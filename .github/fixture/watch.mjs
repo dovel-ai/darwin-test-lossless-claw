@@ -60,7 +60,7 @@ async function latestRelease(module) {
 // What each Darwin pull request moves, from the update marker every Darwin update pull request carries.
 const movesOf = body => {
   // <!-- dovel:update v=1 ecosystem=gomod directory=. moves=github.com%2Ftidwall%2Flotsa@v1.0.5,... -->: names are URL-encoded.
-  const marker = /<!-- dovel:update [^>]*?moves=(\S+)/u.exec(String(body ?? ''))?.[1]
+  const marker = [...String(body ?? '').matchAll(/<!-- dovel:update [^>]*?moves=(\S+)/gu)].at(-1)?.[1]
   if (marker === undefined) return {}
   return Object.fromEntries(marker.split(',').map(item => { const at = item.lastIndexOf('@'); return [decodeURIComponent(item.slice(0, at)), item.slice(at + 1)] }))
 }
@@ -192,7 +192,8 @@ for (const event of events.sort((a, b) => a.at - b.at)) {
   const latest = latestOf.get(event.module)
   const reaches = version => event.kind === 'release' ? atLeast(version, event.version) : newer(version, event.version)
   const proposal = pulls.filter(pull => pull.state === 'open' && reaches(pull.moves[event.module])).sort((a, b) => b.number - a.number)[0]
-  const update = consoleUpdates.find(item => item.name === event.module && Date.parse(item.checkedAt) > event.at && newer(item.latestVersion, event.version))
+  // Held or retrying for this change: the release Darwin would move to reaches it (a hold on v0.6.0 does not cover v0.7.0).
+  const update = consoleUpdates.find(item => item.name === event.module && Date.parse(item.checkedAt) > event.at && reaches(item.recommendedVersion ?? item.latestVersion))
   const needsCode = event.expect?.includes('migration')
   if (newer(present, event.version) || (event.kind === 'release' && atLeast(present, event.version))) status = `merged (main has ${present})`
   else if (proposal !== undefined) {
