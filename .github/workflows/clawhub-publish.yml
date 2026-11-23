@@ -51,7 +51,7 @@ jobs:
           tar -tzf "${tarballs[0]}" | grep -Fx 'package/dist/index.js'
 
       - name: Upload package tarball
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: clawhub-pr-package
           path: ${{ runner.temp }}/clawhub-pr-package/*.tgz
@@ -154,7 +154,7 @@ jobs:
           tar -tzf "${tarballs[0]}" | grep -Fx 'package/dist/index.js'
 
       - name: Upload exact npm package tarball
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: clawhub-release-package
           path: ${{ runner.temp }}/clawhub-release-package/*.tgz
