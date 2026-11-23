@@ -33,9 +33,10 @@ async function graphql(query, variables) {
   return result.data
 }
 const movesOf = body => {
-  const marker = /<!-- dovel:update \S+ \S+ moves=([^\s]+) -->/u.exec(String(body ?? ''))?.[1]
+  // <!-- dovel:update v=1 ecosystem=gomod directory=. moves=github.com%2Ftidwall%2Flotsa@v1.0.5,... -->: names are URL-encoded.
+  const marker = /<!-- dovel:update [^>]*?moves=(\S+)/u.exec(String(body ?? ''))?.[1]
   if (marker === undefined) return {}
-  return Object.fromEntries(marker.split(',').map(item => { const at = item.lastIndexOf('@'); return [item.slice(0, at), item.slice(at + 1)] }))
+  return Object.fromEntries(marker.split(',').map(item => { const at = item.lastIndexOf('@'); return [decodeURIComponent(item.slice(0, at)), item.slice(at + 1)] }))
 }
 
 // The latest completed run of each check on the head commit, and since when all of them have passed.
@@ -87,6 +88,8 @@ for (const pull of pulls.sort((a, b) => a.number - b.number)) {
     await gh('PUT', `repos/${REPO}/pulls/${pull.number}/merge`, { merge_method: 'squash', sha: pull.head.sha })
     decisions.push(held ? `reviewed and merged #${pull.number}, which Darwin held for a person (CI green for ${Math.round((now - ci.since) / 3600_000)} h): ${pull.title}`
       : `merged #${pull.number}, which Darwin marked ready: ${pull.title}`)
+    // The base moved: GitHub recomputes the other pull requests' merge state; until it has, it still says "clean".
+    await sleep(30_000)
   } catch (error) {
     decisions.push(`could not merge #${pull.number}: ${String(error.message).slice(0, 200)}`)
   }

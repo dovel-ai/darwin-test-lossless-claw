@@ -59,9 +59,10 @@ async function latestRelease(module) {
 
 // What each Darwin pull request moves, from the update marker every Darwin update pull request carries.
 const movesOf = body => {
-  const marker = /<!-- dovel:update \S+ \S+ moves=([^\s]+) -->/u.exec(String(body ?? ''))?.[1]
+  // <!-- dovel:update v=1 ecosystem=gomod directory=. moves=github.com%2Ftidwall%2Flotsa@v1.0.5,... -->: names are URL-encoded.
+  const marker = /<!-- dovel:update [^>]*?moves=(\S+)/u.exec(String(body ?? ''))?.[1]
   if (marker === undefined) return {}
-  return Object.fromEntries(marker.split(',').map(item => { const at = item.lastIndexOf('@'); return [item.slice(0, at), item.slice(at + 1)] }))
+  return Object.fromEntries(marker.split(',').map(item => { const at = item.lastIndexOf('@'); return [decodeURIComponent(item.slice(0, at)), item.slice(at + 1)] }))
 }
 const isFix = body => /<!-- dovel:notice(?:-fix)? /u.test(String(body ?? ''))
 const MANIFESTS = /(^|\/)(go\.mod|go\.sum|package\.json|package-lock\.json)$/u
