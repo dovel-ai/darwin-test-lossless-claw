@@ -52,6 +52,8 @@
     "dayjs": "^1.10.0",
     "escape-string-regexp": "^2.0.0",
     "openai": "^7.5.0",
+    "react": "^17.0.2",
+    "react-dom": "^17.0.2",
     "rxjs": "^7.8.1",
     "zod": "^3.25.76"
   },
@@ -61,6 +63,8 @@
     "@earendil-works/pi-agent-core": "^0.79.8",
     "@earendil-works/pi-ai": "^0.79.8",
     "@earendil-works/pi-coding-agent": "^0.79.8",
+    "@types/react": "^17.0.93",
+    "@types/react-dom": "^17.0.26",
     "dompurify": "^3.4.15",
     "esbuild": "^0.28.1",
     "marked": "^18.0.13",
