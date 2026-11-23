@@ -49,6 +49,7 @@
   ],
   "dependencies": {
     "@sinclair/typebox": "0.34.48",
+    "escape-string-regexp": "^2.0.0",
     "openai": "^7.5.0"
   },
   "devDependencies": {
