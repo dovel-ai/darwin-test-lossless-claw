@@ -1,0 +1,398 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { createLcmDatabaseConnection, closeLcmConnection } from "../src/db/connection.js";
+import { getLcmDbFeatures } from "../src/db/features.js";
+import { runLcmMigrations } from "../src/db/migration.js";
+import { ConversationStore } from "../src/store/conversation-store.js";
+import { CompactionMaintenanceStore } from "../src/store/compaction-maintenance-store.js";
+
+const tempDirs: string[] = [];
+const dbs: ReturnType<typeof createLcmDatabaseConnection>[] = [];
+
+function createTestDb() {
+  const tempDir = mkdtempSync(join(tmpdir(), "lossless-claw-maintenance-store-"));
+  tempDirs.push(tempDir);
+  const dbPath = join(tempDir, "lcm.db");
+  const db = createLcmDatabaseConnection(dbPath);
+  dbs.push(db);
+  const { fts5Available } = getLcmDbFeatures(db);
+  runLcmMigrations(db, { fts5Available });
+  return db;
+}
+
+afterEach(() => {
+  for (const db of dbs.splice(0)) {
+    closeLcmConnection(db);
+  }
+  for (const tempDir of tempDirs.splice(0)) {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+describe("CompactionMaintenanceStore", () => {
+  it("allows pending and running flags to transition back to false", async () => {
+    const db = createTestDb();
+    const { fts5Available } = getLcmDbFeatures(db);
+    const conversationStore = new ConversationStore(db, { fts5Available });
+    const conversation = await conversationStore.createConversation({
+      sessionId: "maintenance-store-session",
+      sessionKey: "agent:main:maintenance-store:1",
+    });
+    const store = new CompactionMaintenanceStore(db);
+
+    await store.requestProactiveCompactionDebt({
+      conversationId: conversation.conversationId,
+      reason: "threshold",
+    });
+
+    await store.markProactiveCompactionRunning({
+      conversationId: conversation.conversationId,
+    });
+
+    await store.markProactiveCompactionFinished({
+      conversationId: conversation.conversationId,
+      failureSummary: null,
+      keepPending: false,
+    });
+
+    const record = await store.getConversationCompactionMaintenance(conversation.conversationId);
+    expect(record).not.toBeNull();
+    expect(record?.pending).toBe(false);
+    expect(record?.running).toBe(false);
+  });
+
+  it("persists projected token diagnostics for deferred threshold debt", async () => {
+    const db = createTestDb();
+    const { fts5Available } = getLcmDbFeatures(db);
+    const conversationStore = new ConversationStore(db, { fts5Available });
+    const conversation = await conversationStore.createConversation({
+      sessionId: "maintenance-store-projected-session",
+      sessionKey: "agent:main:maintenance-store:2",
+    });
+    const store = new CompactionMaintenanceStore(db);
+
+    await store.requestProactiveCompactionDebt({
+      conversationId: conversation.conversationId,
+      reason: "threshold",
+      tokenBudget: 600,
+      currentTokenCount: 300,
+      projectedTokenCount: 620,
+      rawTokensOutsideTail: 320,
+      contextThreshold: 0.15,
+      contextThresholdSource: "override",
+      contextFreshTailCount: 16,
+      contextLeafChunkTokens: 12000,
+    });
+
+    const record = await store.getConversationCompactionMaintenance(conversation.conversationId);
+    expect(record).toMatchObject({
+      pending: true,
+      reason: "threshold",
+      tokenBudget: 600,
+      currentTokenCount: 300,
+      projectedTokenCount: 620,
+      rawTokensOutsideTail: 320,
+      contextThreshold: 0.15,
+      contextThresholdSource: "override",
+      contextFreshTailCount: 16,
+      contextLeafChunkTokens: 12000,
+    });
+
+    await store.requestProactiveCompactionDebt({
+      conversationId: conversation.conversationId,
+      reason: "leaf-trigger",
+      tokenBudget: 700,
+      currentTokenCount: 400,
+    });
+
+    const refreshed = await store.getConversationCompactionMaintenance(conversation.conversationId);
+    expect(refreshed).toMatchObject({
+      pending: true,
+      reason: "leaf-trigger",
+      tokenBudget: 700,
+      currentTokenCount: 400,
+      contextThreshold: null,
+      contextThresholdSource: null,
+      contextFreshTailCount: null,
+      contextLeafChunkTokens: null,
+    });
+  });
+
+  it("records retry backoff after failures and clears it after success", async () => {
+    const db = createTestDb();
+    const { fts5Available } = getLcmDbFeatures(db);
+    const conversationStore = new ConversationStore(db, { fts5Available });
+    const conversation = await conversationStore.createConversation({
+      sessionId: "maintenance-store-retry-session",
+      sessionKey: "agent:main:maintenance-store:3",
+    });
+    const store = new CompactionMaintenanceStore(db);
+    const firstFinishedAt = new Date("2026-05-31T12:00:00.000Z");
+    const secondFinishedAt = new Date("2026-05-31T12:05:00.000Z");
+
+    await store.requestProactiveCompactionDebt({
+      conversationId: conversation.conversationId,
+      reason: "threshold",
+    });
+    await store.markProactiveCompactionRunning({
+      conversationId: conversation.conversationId,
+    });
+    await store.markProactiveCompactionFinished({
+      conversationId: conversation.conversationId,
+      failureSummary: "provider timeout",
+      finishedAt: firstFinishedAt,
+    });
+
+    const failed = await store.getConversationCompactionMaintenance(conversation.conversationId);
+    expect(failed?.pending).toBe(true);
+    expect(failed?.running).toBe(false);
+    expect(failed?.retryAttempts).toBe(1);
+    expect(failed?.nextAttemptAfter?.toISOString()).toBe("2026-05-31T12:05:00.000Z");
+
+    await store.markProactiveCompactionRunning({
+      conversationId: conversation.conversationId,
+    });
+    await store.markProactiveCompactionFinished({
+      conversationId: conversation.conversationId,
+      failureSummary: "provider timeout",
+      finishedAt: secondFinishedAt,
+    });
+
+    const failedAgain = await store.getConversationCompactionMaintenance(conversation.conversationId);
+    expect(failedAgain?.retryAttempts).toBe(2);
+    expect(failedAgain?.nextAttemptAfter?.toISOString()).toBe("2026-05-31T12:15:00.000Z");
+
+    for (let attempt = 3; attempt <= 8; attempt += 1) {
+      await store.markProactiveCompactionRunning({
+        conversationId: conversation.conversationId,
+      });
+      await store.markProactiveCompactionFinished({
+        conversationId: conversation.conversationId,
+        failureSummary: "provider timeout",
+        finishedAt: new Date(`2026-05-31T12:${String(10 + attempt).padStart(2, "0")}:00.000Z`),
+      });
+    }
+
+    const capped = await store.getConversationCompactionMaintenance(conversation.conversationId);
+    expect(capped?.retryAttempts).toBe(8);
+    expect(capped?.nextAttemptAfter?.getTime()).toBe(
+      new Date("2026-05-31T12:18:00.000Z").getTime() + 30 * 60 * 1000,
+    );
+
+    await store.markProactiveCompactionRunning({
+      conversationId: conversation.conversationId,
+    });
+    await store.markProactiveCompactionFinished({
+      conversationId: conversation.conversationId,
+      failureSummary: null,
+      keepPending: false,
+    });
+
+    const recovered = await store.getConversationCompactionMaintenance(conversation.conversationId);
+    expect(recovered?.pending).toBe(false);
+    expect(recovered?.running).toBe(false);
+    expect(recovered?.retryAttempts).toBe(0);
+    expect(recovered?.nextAttemptAfter).toBeNull();
+  });
+
+  it("does not add deferred retry backoff for provider auth failures", async () => {
+    const db = createTestDb();
+    const { fts5Available } = getLcmDbFeatures(db);
+    const conversationStore = new ConversationStore(db, { fts5Available });
+    const conversation = await conversationStore.createConversation({
+      sessionId: "maintenance-store-auth-session",
+      sessionKey: "agent:main:maintenance-store:4",
+    });
+    const store = new CompactionMaintenanceStore(db);
+
+    await store.requestProactiveCompactionDebt({
+      conversationId: conversation.conversationId,
+      reason: "threshold",
+    });
+    await store.markProactiveCompactionRunning({
+      conversationId: conversation.conversationId,
+    });
+    await store.markProactiveCompactionFinished({
+      conversationId: conversation.conversationId,
+      failureSummary: "provider auth failure",
+    });
+
+    const record = await store.getConversationCompactionMaintenance(conversation.conversationId);
+    expect(record?.pending).toBe(true);
+    expect(record?.running).toBe(false);
+    expect(record?.retryAttempts).toBe(0);
+    expect(record?.nextAttemptAfter).toBeNull();
+  });
+
+  it.each([
+    { previous: 60, spend: 30, expected: 60 },
+    { previous: 10, spend: 60, expected: 60 },
+    { previous: 1, spend: 2, expected: 5 },
+  ])("preserves the latest applicable retry horizon: $expected minutes", async ({ previous, spend, expected }) => {
+    const db = createTestDb();
+    const conversationStore = new ConversationStore(db, getLcmDbFeatures(db));
+    const conversation = await conversationStore.createConversation({ sessionId: "retry-horizon" });
+    const store = new CompactionMaintenanceStore(db);
+    const finishedAt = new Date("2026-09-25T12:00:00Z");
+    const deadline = (minutes: number) => new Date(finishedAt.getTime() + minutes * 60_000);
+    await store.requestProactiveCompactionDebt({ conversationId: conversation.conversationId, reason: "threshold" });
+    // A pending publication is not a failed provider attempt and starts no
+    // exponential retry. Its external cooldown remains applicable afterwards.
+    await store.markProactiveCompactionFinished({ conversationId: conversation.conversationId,
+      finishedAt, keepPending: true, failureSummary: null, nextAttemptAfter: deadline(previous) });
+    await store.markProactiveCompactionFinished({ conversationId: conversation.conversationId,
+      finishedAt, keepPending: true, failureSummary: "could not reach target", nextAttemptAfter: deadline(spend) });
+    expect(await store.getConversationCompactionMaintenance(conversation.conversationId))
+      .toMatchObject({ pending: true, retryAttempts: 1, nextAttemptAfter: deadline(expected) });
+  });
+
+  it("closes only inactive pending debt and clears the resolution when fresh debt is requested", async () => {
+    const db = createTestDb();
+    const { fts5Available } = getLcmDbFeatures(db);
+    const conversationStore = new ConversationStore(db, { fts5Available });
+    const inactive = await conversationStore.createConversation({
+      sessionId: "maintenance-store-inactive-session",
+      sessionKey: "agent:main:maintenance-store:inactive",
+    });
+    const active = await conversationStore.createConversation({
+      sessionId: "maintenance-store-active-session",
+      sessionKey: "agent:main:maintenance-store:active",
+    });
+    const store = new CompactionMaintenanceStore(db);
+    const resolvedAt = new Date("2026-08-20T12:00:00.000Z");
+
+    await store.requestProactiveCompactionDebt({
+      conversationId: inactive.conversationId,
+      reason: "threshold",
+    });
+    await store.requestProactiveCompactionDebt({
+      conversationId: active.conversationId,
+      reason: "budget-trigger",
+    });
+    await conversationStore.archiveConversation(inactive.conversationId, "rollover-fallback");
+    const activeMaintenance = await store.getConversationCompactionMaintenance(active.conversationId);
+    const inactiveMaintenance = await store.getConversationCompactionMaintenance(inactive.conversationId);
+
+    await expect(
+      store.closeInactiveCompactionDebt({
+        conversationId: active.conversationId,
+        expectedRevision: activeMaintenance!.maintenanceRevision,
+        resolvedAt,
+      }),
+    ).resolves.toBe(false);
+    await expect(
+      store.closeInactiveCompactionDebt({
+        conversationId: inactive.conversationId,
+        expectedRevision: inactiveMaintenance!.maintenanceRevision,
+        resolvedAt,
+      }),
+    ).resolves.toBe(true);
+
+    expect(await store.getConversationCompactionMaintenance(inactive.conversationId)).toMatchObject({
+      pending: false,
+      running: false,
+      reason: "threshold",
+      resolutionReason: "operator-ignored",
+      resolvedAt,
+    });
+
+    await expect(
+      store.closeInactiveCompactionDebt({
+        conversationId: inactive.conversationId,
+        expectedRevision: inactiveMaintenance!.maintenanceRevision,
+        resolvedAt: new Date("2026-08-20T13:00:00.000Z"),
+      }),
+    ).resolves.toBe(false);
+
+    await store.requestProactiveCompactionDebt({
+      conversationId: inactive.conversationId,
+      reason: "fresh-threshold",
+    });
+    expect(await store.getConversationCompactionMaintenance(inactive.conversationId)).toMatchObject({
+      pending: true,
+      running: false,
+      reason: "fresh-threshold",
+      resolutionReason: null,
+      resolvedAt: null,
+    });
+  });
+
+  it("refuses a stale close after debt is refreshed with the same timestamp and reason", async () => {
+    const db = createTestDb();
+    const { fts5Available } = getLcmDbFeatures(db);
+    const conversationStore = new ConversationStore(db, { fts5Available });
+    const conversation = await conversationStore.createConversation({
+      sessionId: "maintenance-store-refreshed-session",
+      sessionKey: "agent:main:maintenance-store:refreshed",
+    });
+    const store = new CompactionMaintenanceStore(db);
+    const requestedAt = new Date("2026-08-20T12:00:00.000Z");
+
+    await store.requestProactiveCompactionDebt({
+      conversationId: conversation.conversationId,
+      reason: "threshold",
+      requestedAt,
+    });
+    await conversationStore.archiveConversation(conversation.conversationId, "rollover-fallback");
+    const staleRevision = (
+      await store.getConversationCompactionMaintenance(conversation.conversationId)
+    )!.maintenanceRevision;
+
+    await store.requestProactiveCompactionDebt({
+      conversationId: conversation.conversationId,
+      reason: "threshold",
+      requestedAt,
+    });
+
+    await expect(
+      store.closeInactiveCompactionDebt({
+        conversationId: conversation.conversationId,
+        expectedRevision: staleRevision,
+      }),
+    ).resolves.toBe(false);
+    expect(await store.getConversationCompactionMaintenance(conversation.conversationId)).toMatchObject({
+      pending: true,
+      running: false,
+      reason: "threshold",
+      resolutionReason: null,
+      resolvedAt: null,
+      maintenanceRevision: staleRevision + 1,
+    });
+  });
+
+  it("refuses to close a running inactive maintenance row", async () => {
+    const db = createTestDb();
+    const { fts5Available } = getLcmDbFeatures(db);
+    const conversationStore = new ConversationStore(db, { fts5Available });
+    const conversation = await conversationStore.createConversation({
+      sessionId: "maintenance-store-running-session",
+      sessionKey: "agent:main:maintenance-store:running",
+    });
+    const store = new CompactionMaintenanceStore(db);
+
+    await store.requestProactiveCompactionDebt({
+      conversationId: conversation.conversationId,
+      reason: "threshold",
+    });
+    await conversationStore.archiveConversation(conversation.conversationId, "rollover-fallback");
+    db.prepare(
+      `UPDATE conversation_compaction_maintenance SET running = 1 WHERE conversation_id = ?`,
+    ).run(conversation.conversationId);
+    const maintenance = await store.getConversationCompactionMaintenance(conversation.conversationId);
+
+    await expect(
+      store.closeInactiveCompactionDebt({
+        conversationId: conversation.conversationId,
+        expectedRevision: maintenance!.maintenanceRevision,
+      }),
+    ).resolves.toBe(false);
+    expect(await store.getConversationCompactionMaintenance(conversation.conversationId)).toMatchObject({
+      pending: true,
+      running: true,
+      resolutionReason: null,
+      resolvedAt: null,
+    });
+  });
+});

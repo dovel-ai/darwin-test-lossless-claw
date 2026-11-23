@@ -1,0 +1,489 @@
+/**
+ * Regression tests for bounded assemble output (lossless-claw-30b.1).
+ *
+ * Incident: a session imported from a previous harness carried live tool
+ * messages whose structured payloads were invisible to text-only token
+ * estimates. assemble() returned a context the host's LLM-boundary
+ * estimator measured at 415k tokens against a 272k budget, wedging the
+ * session in a compact/overflow loop. These tests pin the new invariant:
+ * assemble() output, measured by serialized estimate, never exceeds the
+ * token budget — on the assembler path and on every live-fallback path.
+ */
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { LcmConfig } from "../src/db/config.js";
+import { closeLcmConnection, createLcmDatabaseConnection } from "../src/db/connection.js";
+import { LcmContextEngine } from "../src/engine.js";
+import { estimateSerializedMessagesTokens } from "../src/estimate-tokens.js";
+import {
+  LIVE_WINDOW_LOW_WATERMARK_RATIO,
+  SERIALIZED_OUTPUT_CLAMP_SAFETY_RATIO,
+  buildDegradedLiveAssembleResult,
+  clampMessagesToSerializedBudget,
+  type LiveWindowState,
+} from "../src/assemble-fallback.js";
+import type { AgentMessage } from "../src/openclaw-bridge.js";
+import type { LcmDependencies } from "../src/types.js";
+import { createTestConfig as createSharedTestConfig, createTestDeps as createSharedTestDeps, TestLcmContextEngine } from "./helpers.js";
+
+const tempDirs: string[] = [];
+const engines: LcmContextEngine[] = [];
+const dbs: ReturnType<typeof createLcmDatabaseConnection>[] = [];
+
+afterEach(() => {
+  engines.splice(0);
+  for (const db of dbs.splice(0)) {
+    try {
+      closeLcmConnection(db);
+    } catch {
+      // best-effort cleanup
+    }
+  }
+  for (const dir of tempDirs.splice(0)) {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function createTestConfig(databasePath: string): LcmConfig {
+  return createSharedTestConfig(databasePath, { freshTailCount: 4 });
+}
+
+function parseAgentSessionKey(sessionKey: string): { agentId: string; suffix: string } | null {
+  const trimmed = sessionKey.trim();
+  if (!trimmed.startsWith("agent:")) {
+    return null;
+  }
+  const parts = trimmed.split(":");
+  if (parts.length < 3) {
+    return null;
+  }
+  return { agentId: parts[1] ?? "main", suffix: parts.slice(2).join(":") };
+}
+
+function createTestDeps(config: LcmConfig): LcmDependencies {
+  return createSharedTestDeps(config, {
+    readLatestAssistantReply: () => undefined,
+    resolveAgentDir: () => tmpdir(),
+  });
+}
+
+function createEngine(): LcmContextEngine {
+  const tempDir = mkdtempSync(join(tmpdir(), "lossless-claw-bounded-"));
+  tempDirs.push(tempDir);
+  const config = createTestConfig(join(tempDir, "lcm.db"));
+  const db = createLcmDatabaseConnection(config.databasePath);
+  dbs.push(db);
+  const engine = new TestLcmContextEngine(createTestDeps(config), db);
+  engines.push(engine);
+  return engine;
+}
+
+/**
+ * Codex-era style tool result: large payload duplicated across `content`
+ * and `text` part fields plus mirrored identifiers. Text-only estimators
+ * see a fraction of the serialized mass.
+ */
+function makeHeavyToolResultMessage(index: number, payloadChars: number): AgentMessage {
+  const payload = `tool output ${index}: ${"data ".repeat(Math.ceil(payloadChars / 5))}`;
+  return {
+    role: "toolResult",
+    toolCallId: `call_${index}`,
+    toolName: "exec",
+    content: [
+      {
+        type: "toolResult",
+        id: `call_${index}`,
+        toolCallId: `call_${index}`,
+        toolUseId: `call_${index}`,
+        tool_use_id: `call_${index}`,
+        content: payload,
+        text: payload,
+      },
+    ],
+    timestamp: 1_781_035_270_000 + index,
+  } as unknown as AgentMessage;
+}
+
+function makeUserMessage(index: number): AgentMessage {
+  return {
+    role: "user",
+    content: `user turn ${index}`,
+    timestamp: 1_781_035_270_000 + index,
+  } as unknown as AgentMessage;
+}
+
+function makeHeavyLiveTranscript(pairs: number, payloadChars: number): AgentMessage[] {
+  const messages: AgentMessage[] = [makeUserMessage(0)];
+  for (let i = 1; i <= pairs; i += 1) {
+    messages.push(makeHeavyToolResultMessage(i, payloadChars));
+    if (i % 5 === 0) {
+      messages.push(makeUserMessage(i));
+    }
+  }
+  messages.push(makeUserMessage(pairs + 1));
+  return messages;
+}
+
+/** Build a tool exchange with either runtime result role and ID placement. */
+function makeOversizedToolTurn(
+  resultRole: "tool" | "toolResult",
+  nestedIdOnly: boolean,
+): AgentMessage[] {
+  return [
+    makeUserMessage(0),
+    {
+      role: "assistant",
+      content: [
+        {
+          type: "toolCall",
+          id: "call_image",
+          name: "view_image",
+          arguments: { paths: ["first.png", "second.png", "third.png"] },
+        },
+      ],
+    } as AgentMessage,
+    {
+      role: resultRole,
+      ...(nestedIdOnly ? {} : { toolCallId: "call_image" }),
+      toolName: "view_image",
+      content: [
+        {
+          type: "toolResult",
+          id: "call_image",
+          toolCallId: "call_image",
+          content: "image data ".repeat(2_000),
+        },
+      ],
+    } as AgentMessage,
+  ];
+}
+
+describe("bounded assemble output", () => {
+  const resultShapes = [
+    ["toolResult", false],
+    ["toolResult", true],
+    ["tool", false],
+    ["tool", true],
+  ] as const;
+
+  it.each([false, true])("repairs earlier calls before a preserved assistant reply (preserve: %s)", (preserveSubstantiveAssistantTail) => {
+    const messages = makeOversizedToolTurn("toolResult", false);
+    // An evicted heavy prefix forces clamping while retaining both assistants.
+    messages[0] = { ...makeUserMessage(0), content: "question ".repeat(10_000) } as AgentMessage;
+    messages.pop();
+    messages.push({ role: "assistant", content: "completed reply" } as AgentMessage);
+    const result = clampMessagesToSerializedBudget({
+      messages,
+      tokenBudget: 500,
+      preserveSubstantiveAssistantTail,
+    });
+
+    expect(result.clamped).toBe(true);
+    if (preserveSubstantiveAssistantTail) {
+      expect(result.messages.map((message) => message.role)).toEqual([
+        "user", "assistant", "toolResult", "assistant",
+      ]);
+      expect(result.messages[2]).toMatchObject({ toolCallId: "call_image", isError: true });
+      expect(result.messages[3]).toEqual(messages[2]);
+    } else {
+      expect(result.messages).toEqual([messages[0]]);
+    }
+  });
+
+  it.each([false, true])("preserves the serialized-clamp assistant-tail policy (preserve: %s)", (preserveSubstantiveAssistantTail) => {
+    const messages = makeOversizedToolTurn("toolResult", false).slice(0, 2);
+    const result = clampMessagesToSerializedBudget({
+      messages,
+      tokenBudget: 1,
+      preserveSubstantiveAssistantTail,
+    });
+
+    expect(result.clamped).toBe(true);
+    expect(result.messages).toEqual(
+      preserveSubstantiveAssistantTail ? messages : [messages[0]],
+    );
+  });
+
+  it.each([false, true])("preserves the degraded assistant-tail policy (preserve: %s)", (preserveSubstantiveAssistantTail) => {
+    const liveMessages = makeOversizedToolTurn("toolResult", false).slice(0, 2);
+    const result = buildDegradedLiveAssembleResult({
+      liveMessages,
+      tokenBudget: 1,
+      preserveSubstantiveAssistantTail,
+      contextProjection: { mode: "thread_bootstrap" },
+    });
+
+    expect(result.messages).toEqual(
+      preserveSubstantiveAssistantTail ? liveMessages : [liveMessages[0]],
+    );
+  });
+
+  it.each(resultShapes)("keeps an oversized degraded %s result paired (nested ID only: %s)", (role, nestedIdOnly) => {
+    const liveMessages = makeOversizedToolTurn(role, nestedIdOnly);
+    const originalMessages = structuredClone(liveMessages);
+    const result = buildDegradedLiveAssembleResult({
+      liveMessages,
+      tokenBudget: 100,
+      contextProjection: { mode: "thread_bootstrap", epoch: "test-projection" },
+    });
+
+    expect(result.estimatedTokens).toBeGreaterThan(100);
+    expect(result.messages.map((message) => message.role)).toEqual([
+      "user",
+      "assistant",
+      "toolResult",
+    ]);
+    expect(result.messages[2]).toEqual({
+      ...liveMessages[2],
+      role: "toolResult",
+      toolCallId: "call_image",
+    });
+    expect(liveMessages).toEqual(originalMessages);
+  });
+
+  it.each(resultShapes)("keeps an oversized clamped %s result paired (nested ID only: %s)", (role, nestedIdOnly) => {
+    const messages = makeOversizedToolTurn(role, nestedIdOnly);
+    const originalMessages = structuredClone(messages);
+    const result = clampMessagesToSerializedBudget({
+      messages,
+      tokenBudget: 100,
+    });
+
+    expect(result.clamped).toBe(true);
+    expect(result.overBudget).toBe(true);
+    expect(result.messages.map((message) => message.role)).toEqual([
+      "user",
+      "assistant",
+      "toolResult",
+    ]);
+    expect(result.messages[2]).toEqual({
+      ...messages[2],
+      role: "toolResult",
+      toolCallId: "call_image",
+    });
+    expect(messages).toEqual(originalMessages);
+  });
+
+  it("clamps near-budget serialized output to leave host renderer headroom", () => {
+    const messages = makeHeavyLiveTranscript(12, 4_000);
+    const serializedTokens = estimateSerializedMessagesTokens(messages);
+    const tokenBudget = Math.ceil(serializedTokens / 0.95);
+
+    expect(serializedTokens).toBeLessThan(tokenBudget);
+    expect(serializedTokens).toBeGreaterThan(
+      Math.floor(tokenBudget * SERIALIZED_OUTPUT_CLAMP_SAFETY_RATIO),
+    );
+
+    const result = clampMessagesToSerializedBudget({ messages, tokenBudget });
+
+    expect(result.clamped).toBe(true);
+    expect(result.serializedTokens).toBeLessThanOrEqual(
+      Math.floor(tokenBudget * SERIALIZED_OUTPUT_CLAMP_SAFETY_RATIO),
+    );
+    expect(result.evictedMessages).toBeGreaterThan(0);
+    expect(result.messages.some((m) => m.role === "user")).toBe(true);
+  });
+
+  it("bounds the live fallback when stored coverage trails a heavy live transcript", async () => {
+    const engine = createEngine();
+    const sessionId = "session-bounded-fallback";
+    const sessionKey = "agent:main:telegram:group:test:topic:1";
+
+    // Persist a couple of raw messages so the conversation exists but
+    // coverage clearly trails the live transcript (no summaries).
+    await engine.ingest({ sessionId, sessionKey, message: makeUserMessage(0) });
+    await engine.ingest({ sessionId, sessionKey, message: makeUserMessage(1) });
+
+    const tokenBudget = 8_000;
+    const liveMessages = makeHeavyLiveTranscript(40, 4_000);
+    const liveSerializedTokens = estimateSerializedMessagesTokens(liveMessages);
+    expect(liveSerializedTokens).toBeGreaterThan(tokenBudget * 3);
+
+    const result = await engine.assemble({
+      sessionId,
+      sessionKey,
+      messages: liveMessages,
+      tokenBudget,
+    });
+
+    expect(result.messages.length).toBeGreaterThan(0);
+    expect(result.messages.length).toBeLessThan(liveMessages.length);
+    expect(estimateSerializedMessagesTokens(result.messages)).toBeLessThanOrEqual(tokenBudget);
+    expect(result.estimatedTokens).toBeLessThanOrEqual(tokenBudget);
+    expect(result.estimatedTokens).toBeGreaterThan(0);
+    // Output keeps the newest suffix: the final user turn must survive.
+    expect(result.messages.some((m) => m.role === "user")).toBe(true);
+    expect(result.messages[result.messages.length - 1]?.role).not.toBe("assistant");
+  });
+
+  it("clamps assembled output whose serialized size exceeds the budget", async () => {
+    const engine = createEngine();
+    const sessionId = "session-clamped-assembled";
+    const sessionKey = "agent:main:telegram:group:test:topic:2";
+
+    // Persist the full heavy transcript so assembly covers the live set.
+    const liveMessages = makeHeavyLiveTranscript(30, 4_000);
+    for (const message of liveMessages) {
+      await engine.ingest({ sessionId, sessionKey, message });
+    }
+
+    const tokenBudget = 6_000;
+    const result = await engine.assemble({
+      sessionId,
+      sessionKey,
+      messages: liveMessages,
+      tokenBudget,
+    });
+
+    expect(result.messages.length).toBeGreaterThan(0);
+    expect(estimateSerializedMessagesTokens(result.messages)).toBeLessThanOrEqual(tokenBudget);
+    expect(result.estimatedTokens).toBeLessThanOrEqual(tokenBudget);
+    expect(result.messages.some((m) => m.role === "user")).toBe(true);
+  });
+
+  it("does not clamp small contexts and reports a non-zero estimate", async () => {
+    const engine = createEngine();
+    const sessionId = "session-small-context";
+    const sessionKey = "agent:main:telegram:group:test:topic:3";
+
+    await engine.ingest({ sessionId, sessionKey, message: makeUserMessage(0) });
+
+    const result = await engine.assemble({
+      sessionId,
+      sessionKey,
+      messages: [makeUserMessage(0)],
+      tokenBudget: 50_000,
+    });
+
+    expect(result.messages).toHaveLength(1);
+    expect(result.estimatedTokens).toBeGreaterThan(0);
+    expect(result.estimatedTokens).toBeLessThan(1_000);
+  });
+
+  it("passes ignored sessions through untouched", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "lossless-claw-bounded-"));
+    tempDirs.push(tempDir);
+    const config = {
+      ...createTestConfig(join(tempDir, "lcm.db")),
+      ignoreSessionPatterns: ["agent:*:cron:**"],
+    };
+    const db = createLcmDatabaseConnection(config.databasePath);
+    dbs.push(db);
+    const engine = new TestLcmContextEngine(createTestDeps(config), db);
+    engines.push(engine);
+
+    const liveMessages = makeHeavyLiveTranscript(20, 4_000);
+    const result = await engine.assemble({
+      sessionId: "session-ignored",
+      sessionKey: "agent:main:cron:hourly",
+      messages: liveMessages,
+      tokenBudget: 1_000,
+    });
+
+    // Ignored sessions are not managed by LCM: no clamping, legacy shape.
+    expect(result.messages.length).toBe(liveMessages.length);
+    expect(result.estimatedTokens).toBe(0);
+  });
+});
+
+describe("degraded live fallback preserves a user turn", () => {
+  it("re-seats the most recent user turn when budget-trimming drops it from a tool loop", () => {
+    // Regression contributed by @JerretK in #1156: Qwen chat templates require
+    // a user query even when budget pressure retains only a long tool-loop tail.
+    const liveMessages: AgentMessage[] = [makeUserMessage(0)];
+    for (let i = 1; i <= 12; i += 1) {
+      liveMessages.push(makeHeavyToolResultMessage(i, 4_000));
+    }
+
+    const result = buildDegradedLiveAssembleResult({
+      liveMessages,
+      tokenBudget: 3_000,
+      contextProjection: { mode: "thread_bootstrap" },
+    });
+
+    expect(result.messages.length).toBeLessThan(liveMessages.length);
+    expect(result.messages.some((message) => message.role === "user")).toBe(true);
+    expect(result.estimatedTokens).toBeGreaterThan(0);
+  });
+});
+
+describe("stable bounded live window", () => {
+  function makeTextTurn(index: number): AgentMessage {
+    return {
+      role: index % 2 === 0 ? "user" : "assistant",
+      content: `turn ${index} ${"window filler ".repeat(110)}`,
+    } as unknown as AgentMessage;
+  }
+
+  it("keeps the clamp head fixed while an append-only transcript grows", () => {
+    const tokenBudget = 10_000;
+    const liveWindow: LiveWindowState = {};
+    const transcript = Array.from({ length: 40 }, (_, index) => makeTextTurn(index));
+    const heads: AgentMessage[] = [];
+    for (let length = 24; length <= transcript.length; length += 1) {
+      const result = clampMessagesToSerializedBudget({
+        messages: transcript.slice(0, length),
+        tokenBudget,
+        liveWindow,
+      });
+      expect(result.serializedTokens).toBeLessThanOrEqual(tokenBudget * SERIALIZED_OUTPUT_CLAMP_SAFETY_RATIO);
+      heads.push(result.messages[0]!);
+    }
+
+    const changes = heads.filter((head, index) => index > 0 && head !== heads[index - 1]).length;
+    expect(changes).toBeLessThanOrEqual(2);
+    // A moved head is trimmed to the low watermark, not to the clamp target.
+    const firstClamp = clampMessagesToSerializedBudget({
+      messages: transcript,
+      tokenBudget,
+      liveWindow: {},
+    });
+    expect(firstClamp.serializedTokens).toBeLessThanOrEqual(tokenBudget * LIVE_WINDOW_LOW_WATERMARK_RATIO);
+  });
+
+  it("keeps the degraded head fixed while the budget shrinks over a fixed history", () => {
+    const liveWindow: LiveWindowState = {};
+    const history = Array.from({ length: 30 }, (_, index) => makeTextTurn(index));
+    const heads: AgentMessage[] = [];
+    for (let tokenBudget = 9_000; tokenBudget >= 3_000; tokenBudget -= 300) {
+      const result = buildDegradedLiveAssembleResult({
+        liveMessages: history,
+        tokenBudget,
+        contextProjection: { mode: "thread_bootstrap" },
+        liveWindow,
+      });
+      expect(result.estimatedTokens).toBeLessThanOrEqual(tokenBudget);
+      heads.push(result.messages[0]!);
+    }
+
+    const changes = heads.filter((head, index) => index > 0 && head !== heads[index - 1]).length;
+    expect(changes).toBeLessThanOrEqual(2);
+  });
+
+  it("re-anchors when the anchored message is rewritten", () => {
+    const tokenBudget = 10_000;
+    const liveWindow: LiveWindowState = {};
+    const transcript = Array.from({ length: 40 }, (_, index) => makeTextTurn(index));
+    const first = clampMessagesToSerializedBudget({ messages: transcript, tokenBudget, liveWindow });
+    const anchorIndex = liveWindow.anchor!.index;
+    expect(first.messages[0]).toBe(transcript[anchorIndex]);
+
+    const rewritten = transcript.slice();
+    rewritten[anchorIndex] = { ...transcript[anchorIndex]!, content: "rewritten" } as AgentMessage;
+    const second = clampMessagesToSerializedBudget({ messages: rewritten, tokenBudget, liveWindow });
+    expect(liveWindow.anchor!.hash).not.toBe(undefined);
+    expect(second.messages[0]).toBe(rewritten[liveWindow.anchor!.index]);
+    expect(second.serializedTokens).toBeLessThanOrEqual(tokenBudget * LIVE_WINDOW_LOW_WATERMARK_RATIO);
+  });
+
+  it("re-expands a window that fell below the low watermark of a larger budget", () => {
+    const liveWindow: LiveWindowState = {};
+    const transcript = Array.from({ length: 40 }, (_, index) => makeTextTurn(index));
+    const small = clampMessagesToSerializedBudget({ messages: transcript, tokenBudget: 4_000, liveWindow });
+    const large = clampMessagesToSerializedBudget({ messages: transcript, tokenBudget: 12_000, liveWindow });
+    expect(large.messages.length).toBeGreaterThan(small.messages.length);
+    expect(large.serializedTokens).toBeLessThanOrEqual(12_000 * SERIALIZED_OUTPUT_CLAMP_SAFETY_RATIO);
+  });
+});

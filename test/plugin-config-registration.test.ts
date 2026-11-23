@@ -1,0 +1,1591 @@
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { AgentMessage, OpenClawPluginApi } from "../src/openclaw-bridge.js";
+import lcmPlugin from "../index.js";
+import * as connectionModule from "../src/db/connection.js";
+import { closeLcmConnection } from "../src/db/connection.js";
+import { LcmContextEngine } from "../src/engine.js";
+import { clearAllSharedInit } from "../src/plugin/shared-init.js";
+import { resetStartupBannerLogsForTests } from "../src/startup-banner-log.js";
+import { runDelegatedExpansionLoop } from "../src/tools/lcm-expand-tool.delegation.js";
+import { FakeTranscriptHost } from "./transcript-delta-fake-host.js";
+
+const buildMemorySystemPromptAdditionMock = vi.hoisted(() => vi.fn());
+const transcriptRuntime = vi.hoisted(() => ({
+  modulePath: "openclaw/plugin-sdk/context-engine-transcript-runtime",
+  replay: undefined as unknown,
+  visible: vi.fn(),
+  raw: vi.fn(),
+  entries: vi.fn(),
+}));
+
+vi.mock("openclaw/plugin-sdk/session-transcript-runtime", () => ({
+  readSessionTranscriptVisibleMessageDelta: transcriptRuntime.visible,
+  readSessionTranscriptRawDelta: transcriptRuntime.raw,
+  readVisibleSessionTranscriptMessageEntries: transcriptRuntime.entries,
+}));
+
+vi.mock(transcriptRuntime.modulePath, () => ({
+  get readSessionTranscriptReplayGroups() { return transcriptRuntime.replay; },
+}));
+
+vi.mock("openclaw/plugin-sdk/core", () => ({
+  buildMemorySystemPromptAddition: buildMemorySystemPromptAdditionMock,
+}));
+
+vi.mock("openclaw/plugin-sdk/logging-core", () => ({
+  redactSensitiveText: (text: string) => text,
+}));
+
+type RegisteredEngineFactory = (() => unknown) | undefined;
+type HookHandler = (event: unknown, context: unknown) => unknown;
+type RegisteredContextEngine = { id: string; factory: () => unknown };
+
+function buildApi(
+  pluginConfig: unknown,
+  options?: {
+    includeModelAuth?: boolean;
+    includeRuntimeLlm?: boolean;
+	    agentDir?: string;
+	    runtimeConfig?: Record<string, unknown>;
+	    registrationMode?: string;
+	    shouldLogVerbose?: boolean;
+	  },
+): {
+  api: OpenClawPluginApi;
+  getFactory: () => RegisteredEngineFactory;
+  getHook: (hookName: string) => HookHandler | undefined;
+  getRegisteredContextEngines: () => RegisteredContextEngine[];
+  infoLog: ReturnType<typeof vi.fn>;
+  warnLog: ReturnType<typeof vi.fn>;
+  errorLog: ReturnType<typeof vi.fn>;
+  debugLog: ReturnType<typeof vi.fn>;
+  sessionInfoLog: ReturnType<typeof vi.fn>;
+  sessionWarnLog: ReturnType<typeof vi.fn>;
+} {
+  let factory: RegisteredEngineFactory;
+  const registeredContextEngines: RegisteredContextEngine[] = [];
+  const hooks = new Map<string, HookHandler[]>();
+  const infoLog = vi.fn();
+  const warnLog = vi.fn();
+  const errorLog = vi.fn();
+  const debugLog = vi.fn();
+  const sessionInfoLog = vi.fn();
+  const sessionWarnLog = vi.fn();
+  const agentDir = options?.agentDir ?? "/tmp/fake-agent";
+
+  const api = {
+    id: "lossless-claw",
+    name: "Lossless Context Management",
+    source: "/tmp/lossless-claw",
+    config: {},
+    pluginConfig,
+    ...(options?.registrationMode ? { registrationMode: options.registrationMode } : {}),
+    runtime: {
+      subagent: {
+        run: vi.fn(),
+        waitForRun: vi.fn(),
+        getSessionMessages: vi.fn(),
+        deleteSession: vi.fn(),
+      },
+      ...(options?.includeRuntimeLlm === false
+        ? {}
+        : {
+            llm: {
+              complete: vi.fn(async () => ({
+                text: "summary output",
+                provider: "anthropic",
+                model: "claude-sonnet-4-6",
+                agentId: "main",
+                usage: {},
+                audit: { caller: { kind: "plugin", id: "lossless-claw" } },
+              })),
+            },
+          }),
+      ...(options?.includeModelAuth === false
+        ? {}
+        : {
+            modelAuth: {
+              getApiKeyForModel: vi.fn(async () => undefined),
+              resolveApiKeyForProvider: vi.fn(async () => undefined),
+            },
+          }),
+	      config: {
+	        current: vi.fn(() => options?.runtimeConfig ?? {}),
+	        loadConfig: vi.fn(() => options?.runtimeConfig ?? {}),
+	      },
+	      logging: {
+	        shouldLogVerbose: vi.fn(() => options?.shouldLogVerbose ?? false),
+	        getChildLogger: vi.fn(() => ({
+	          info: infoLog,
+          warn: warnLog,
+          error: errorLog,
+          debug: debugLog,
+        })),
+      },
+      channel: {
+        session: {
+          resolveStorePath: vi.fn(() => "/tmp/nonexistent-session-store.json"),
+        },
+      },
+    },
+    logger: {
+      info: sessionInfoLog,
+      warn: sessionWarnLog,
+      error: vi.fn(),
+      debug: vi.fn(),
+    },
+    registerContextEngine: vi.fn((id: string, nextFactory: () => unknown) => {
+      registeredContextEngines.push({ id, factory: nextFactory });
+      factory = nextFactory;
+    }),
+    registerTool: vi.fn(),
+    registerHook: vi.fn(),
+    registerHttpHandler: vi.fn(),
+    registerHttpRoute: vi.fn(),
+    registerChannel: vi.fn(),
+    registerGatewayMethod: vi.fn(),
+    registerCli: vi.fn(),
+    registerService: vi.fn(),
+    registerProvider: vi.fn(),
+    registerCommand: vi.fn(),
+    resolvePath: vi.fn(() => agentDir),
+    on: vi.fn((hookName: string, handler: HookHandler) => {
+      const existing = hooks.get(hookName) ?? [];
+      existing.push(handler);
+      hooks.set(hookName, existing);
+    }),
+  } as unknown as OpenClawPluginApi;
+
+  return {
+    api,
+    getFactory: () => factory,
+    getHook: (hookName: string) => hooks.get(hookName)?.[0],
+    getRegisteredContextEngines: () => [...registeredContextEngines],
+    infoLog,
+    warnLog,
+    errorLog,
+    debugLog,
+    sessionInfoLog,
+    sessionWarnLog,
+  };
+}
+
+function defaultModelConfig(model: string): Record<string, unknown> {
+  return {
+    agents: {
+      defaults: {
+        model: {
+          primary: model,
+        },
+      },
+    },
+  };
+}
+
+function compactionAndDefaultModelConfig(params: {
+  compactionModel?: string;
+  defaultModel?: string;
+}): Record<string, unknown> {
+  return {
+    agents: {
+      defaults: {
+        ...(params.defaultModel
+          ? {
+              model: {
+                primary: params.defaultModel,
+              },
+            }
+          : {}),
+        ...(params.compactionModel
+          ? {
+              compaction: {
+                model: params.compactionModel,
+              },
+            }
+          : {}),
+      },
+    },
+  };
+}
+
+describe("lcm plugin registration", () => {
+  const dbPaths = new Set<string>();
+  const tempDirs = new Set<string>();
+
+  afterEach(() => {
+    for (const dbPath of dbPaths) {
+      closeLcmConnection(dbPath);
+    }
+    dbPaths.clear();
+    clearAllSharedInit();
+    resetStartupBannerLogsForTests();
+    buildMemorySystemPromptAdditionMock.mockReset();
+    transcriptRuntime.replay = undefined;
+    transcriptRuntime.visible.mockReset();
+    transcriptRuntime.raw.mockReset();
+    transcriptRuntime.entries.mockReset();
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    for (const dir of tempDirs) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    tempDirs.clear();
+  });
+
+  it.each(["unsupported", "canonical", "empty", "rejected"] as const)(
+    "assembles retained history through the registered plugin on a %s replay host",
+    async (capability) => {
+      const dir = mkdtempSync(join(tmpdir(), "lcm-replay-host-"));
+      tempDirs.add(dir);
+      const dbPath = join(dir, "lcm.db");
+      dbPaths.add(dbPath);
+      const sessionId = "replay-host";
+      const sessionKey = "agent:main:replay-host";
+      const sessionTarget = { agentId: "main", sessionId, sessionKey };
+      const host = new FakeTranscriptHost(sessionId);
+      const users = Array.from({ length: 3 }, (_, index) => ({
+        role: "user", content: `request ${index}`, timestamp: 1000 + index,
+        idempotencyKey: `turn-${index}`,
+        provenance: { kind: "inter_session", sourceSessionKey: "agent:main:child", sourceTool: "subagent_settle" },
+      } as AgentMessage));
+      const entryIds = users.map(message => host.append(message));
+      const carrier = {
+        role: "custom", customType: "openclaw.runtime-context", display: false,
+        content: "retained runtime context", timestamp: 1001,
+        details: { source: "openclaw-runtime-context", runtimeContextCarrier: true },
+      } as AgentMessage;
+      transcriptRuntime.visible.mockImplementation(host.readVisibleDelta);
+      transcriptRuntime.raw.mockImplementation(host.readRawDelta);
+      transcriptRuntime.entries.mockImplementation(host.readVisibleEntries);
+      const readReplay = vi.fn(async () => {
+        if (capability === "rejected") throw new Error("canonical read unavailable");
+        return capability === "empty" ? [] : [{ entryId: entryIds[1], message: users[1], carriers: [carrier] }];
+      });
+      transcriptRuntime.replay = capability === "unsupported" ? undefined : readReplay;
+      const { api, getFactory, debugLog } = buildApi({
+        enabled: true, dbPath, independentLogFile: { enabled: false },
+      });
+      lcmPlugin.register(api);
+      const engine = getFactory()!() as Pick<LcmContextEngine,
+        "bootstrap" | "assemble" | "getConversationStore" | "getSummaryStore">;
+      await engine.bootstrap({ sessionId, sessionKey, sessionTarget });
+      const conversation = await engine.getConversationStore().getConversationForSession({ sessionId, sessionKey });
+      await engine.getSummaryStore().insertSummary({
+        summaryId: "retained-summary", conversationId: conversation!.conversationId,
+        kind: "leaf", depth: 0, content: "Earlier summarized history", tokenCount: 8,
+      });
+      await engine.getSummaryStore().replaceContextRangeWithSummary({
+        conversationId: conversation!.conversationId, startOrdinal: 0, endOrdinal: 0, summaryId: "retained-summary",
+      });
+      // Supported hosts must restore history outside the live window. The
+      // unsupported path can only restore carriers still in that window.
+      const live = capability === "canonical" ? [users[2]!] : [users[1]!, carrier, users[2]!];
+      const result = await engine.assemble({
+        sessionId, sessionKey, sessionTarget, messages: live, tokenBudget: 100_000,
+      } as Parameters<typeof engine.assemble>[0]);
+      if (capability === "rejected") {
+        expect(result.messages).toEqual(live);
+        expect(debugLog).toHaveBeenCalledWith(expect.stringContaining("canonical read unavailable"));
+        return;
+      }
+      expect(JSON.stringify(result.messages[0])).toContain("Earlier summarized history");
+      if (capability === "empty") {
+        // A valid empty response must not fall back to live carrier replay.
+        expect(result.messages).not.toContainEqual(carrier);
+      } else {
+        const index = result.messages.findIndex(message => Reflect.get(message, "idempotencyKey") === "turn-1");
+        expect(index).toBeGreaterThan(0);
+        expect(result.messages[index + 1]).toEqual(carrier);
+        if (capability === "canonical") expect(result.messages[index]).toMatchObject({ provenance: Reflect.get(users[1]!, "provenance") });
+      }
+      if (capability === "unsupported") expect(readReplay).not.toHaveBeenCalled();
+      else expect(readReplay).toHaveBeenCalledWith(expect.objectContaining({ entryIds: entryIds.slice(1) }));
+      expect(debugLog.mock.calls.flat().join(" ")).not.toContain("assemble: failed");
+    },
+  );
+
+  it("registers only the lossless-claw context engine id", () => {
+    const { api, getRegisteredContextEngines } = buildApi({ enabled: true });
+
+    lcmPlugin.register(api);
+
+    expect(getRegisteredContextEngines()).toEqual([
+      expect.objectContaining({ id: "lossless-claw" }),
+    ]);
+  });
+
+  it("does not initialize runtime surfaces during CLI metadata registration", () => {
+    const createSpy = vi.spyOn(connectionModule, "createLcmDatabaseConnection");
+    const { api, getRegisteredContextEngines, infoLog, warnLog } = buildApi(
+      { enabled: true },
+      {
+        includeRuntimeLlm: false,
+        registrationMode: "cli-metadata",
+      },
+    );
+
+    lcmPlugin.register(api);
+
+    expect(createSpy).not.toHaveBeenCalled();
+    expect(getRegisteredContextEngines()).toEqual([]);
+    expect(api.registerCommand).not.toHaveBeenCalled();
+    expect(api.registerTool).not.toHaveBeenCalled();
+    expect(api.on).not.toHaveBeenCalled();
+    expect(infoLog).not.toHaveBeenCalled();
+    expect(warnLog).not.toHaveBeenCalledWith(
+      expect.stringContaining("runtime.llm.complete is unavailable"),
+    );
+  });
+
+  it("does not initialize runtime surfaces during runtime-scoped CLI metadata registration", () => {
+    const createSpy = vi.spyOn(connectionModule, "createLcmDatabaseConnection");
+    const { api, getRegisteredContextEngines, infoLog, warnLog } = buildApi(
+      { enabled: true },
+      {
+        includeRuntimeLlm: false,
+      },
+    );
+    (api.runtime as { registrationMode?: string }).registrationMode = "cli-metadata";
+
+    lcmPlugin.register(api);
+
+    expect(createSpy).not.toHaveBeenCalled();
+    expect(getRegisteredContextEngines()).toEqual([]);
+    expect(api.registerCommand).not.toHaveBeenCalled();
+    expect(api.registerTool).not.toHaveBeenCalled();
+    expect(api.on).not.toHaveBeenCalled();
+    expect(infoLog).not.toHaveBeenCalled();
+    expect(warnLog).not.toHaveBeenCalledWith(
+      expect.stringContaining("runtime.llm.complete is unavailable"),
+    );
+  });
+
+  it.each(["discovery", "tool-discovery"])(
+    "does not eagerly initialize the engine during %s registration",
+    (registrationMode) => {
+      const dbPath = join(tmpdir(), `lossless-claw-${Date.now()}-${Math.random().toString(16)}.db`);
+      dbPaths.add(dbPath);
+      const createSpy = vi.spyOn(connectionModule, "createLcmDatabaseConnection");
+      const { api, getFactory } = buildApi(
+        { enabled: true, dbPath },
+        { registrationMode },
+      );
+
+      lcmPlugin.register(api);
+
+      expect(createSpy).not.toHaveBeenCalled();
+      expect(getFactory()).toBeTypeOf("function");
+    },
+  );
+
+  it.each(["discovery", "tool-discovery"])(
+    "does not initialize the runtime database during %s registration",
+    async (registrationMode) => {
+      const dbPath = join(tmpdir(), `lossless-claw-${Date.now()}-${Math.random().toString(16)}.db`);
+      dbPaths.add(dbPath);
+      const createSpy = vi.spyOn(connectionModule, "createLcmDatabaseConnection");
+      const { api, getFactory } = buildApi(
+        { enabled: true, dbPath },
+        { registrationMode },
+      );
+
+      lcmPlugin.register(api);
+
+      const factory = getFactory();
+      expect(factory).toBeTypeOf("function");
+      await expect(Promise.resolve(factory!())).rejects.toThrow(
+        "Engine initialization is disabled during read-only plugin registration",
+      );
+      expect(createSpy).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does not initialize the runtime database during CLI runtime inspection", async () => {
+    const dbPath = join(tmpdir(), `lossless-claw-${Date.now()}-${Math.random().toString(16)}.db`);
+    const originalArgv = process.argv;
+    dbPaths.add(dbPath);
+    const { api, getFactory } = buildApi({ enabled: true, dbPath });
+
+    process.argv = ["node", "openclaw", "plugins", "inspect", "lossless-claw", "--runtime"];
+    try {
+      lcmPlugin.register(api);
+
+      const factory = getFactory();
+      expect(factory).toBeTypeOf("function");
+      await expect(Promise.resolve(factory!())).rejects.toThrow(
+        "Engine initialization is disabled during read-only plugin registration",
+      );
+    } finally {
+      process.argv = originalArgv;
+    }
+  });
+
+  it("does not eagerly initialize the engine during CLI runtime inspection", () => {
+    const dbPath = join(tmpdir(), `lossless-claw-${Date.now()}-${Math.random().toString(16)}.db`);
+    const originalArgv = process.argv;
+    dbPaths.add(dbPath);
+    const createSpy = vi.spyOn(connectionModule, "createLcmDatabaseConnection");
+    const { api, getFactory } = buildApi({ enabled: true, dbPath });
+
+    process.argv = ["node", "openclaw", "plugins", "inspect", "lossless-claw", "--runtime"];
+    try {
+      lcmPlugin.register(api);
+
+      expect(createSpy).not.toHaveBeenCalled();
+      expect(getFactory()).toBeTypeOf("function");
+    } finally {
+      process.argv = originalArgv;
+    }
+  });
+
+  it("fails fast with a compatibility diagnostic when context-engine registration is unavailable", () => {
+    const dbPath = join(tmpdir(), `lossless-claw-${Date.now()}-${Math.random().toString(16)}.db`);
+    dbPaths.add(dbPath);
+    const createSpy = vi.spyOn(connectionModule, "createLcmDatabaseConnection");
+    const { api, errorLog } = buildApi({ enabled: true, dbPath });
+    (api.runtime as Record<string, unknown>).openclawVersion = "2026.5.1";
+    delete (api as unknown as { registerContextEngine?: unknown }).registerContextEngine;
+
+    expect(() => lcmPlugin.register(api)).toThrow(
+      /requires OpenClaw >=2026\.9\.2 with api\.registerContextEngine/,
+    );
+    expect(createSpy).not.toHaveBeenCalled();
+    expect(api.registerCommand).not.toHaveBeenCalled();
+    expect(api.registerTool).not.toHaveBeenCalled();
+    expect(errorLog).toHaveBeenCalledWith(expect.stringContaining("detectedHost=2026.5.1"));
+  });
+
+  it.each(["error", "capture-only"] as const)("adds registered host memory supplements in %s mode", async (hostFallbackMode) => {
+    const dbPath = join(tmpdir(), `lossless-claw-${Date.now()}-${Math.random().toString(16)}.db`);
+    const availableTools = new Set(["memory_search", "lcm_grep"]);
+    dbPaths.add(dbPath);
+    buildMemorySystemPromptAdditionMock.mockReturnValue(
+      "## Compiled Wiki Snapshot\nUse the current project glossary.",
+    );
+
+    const { api, getFactory } = buildApi({
+      enabled: true,
+      dbPath,
+      hostFallbackMode,
+    });
+    lcmPlugin.register(api);
+
+    const factory = getFactory();
+    expect(factory).toBeTypeOf("function");
+
+    const engine = factory!() as {
+      afterTurn?: unknown;
+      commitTurn?: unknown;
+      maintain?: unknown;
+      dispose?: unknown;
+      assemble: (params: {
+        sessionId: string;
+        messages: unknown[];
+        availableTools?: Set<string>;
+        citationsMode?: string;
+        runtimeSettings?: { schemaVersion: 1; executionHost: { id: string; label: null } };
+      }) => Promise<{ systemPromptAddition?: string; messages: unknown[]; estimatedTokens: number }>;
+    };
+    expect(engine.afterTurn).toBeTypeOf("function");
+    expect(engine.commitTurn).toBeTypeOf("function");
+    expect(engine.maintain).toBeTypeOf("function");
+    expect(engine.dispose).toBeTypeOf("function");
+    const result = await engine.assemble({
+      sessionId: "missing-session",
+      messages: [],
+      availableTools,
+      citationsMode: "inline",
+      runtimeSettings: { schemaVersion: 1, executionHost: { id: "cli:claude-cli", label: null } },
+    });
+    expect(result.messages).toEqual([]);
+    expect(result.estimatedTokens).toBe(0);
+
+    expect(buildMemorySystemPromptAdditionMock).toHaveBeenCalledWith({
+      availableTools,
+      citationsMode: "inline",
+    });
+    expect(result.systemPromptAddition).toBe(
+      "## Compiled Wiki Snapshot\nUse the current project glossary.",
+    );
+  });
+
+  it("uses api.pluginConfig values during register", { timeout: 20000 }, () => {
+    const dbPath = join(tmpdir(), `lossless-claw-${Date.now()}-${Math.random().toString(16)}.db`);
+    dbPaths.add(dbPath);
+    const logDir = mkdtempSync(join(tmpdir(), "lossless-claw-plugin-log-"));
+    tempDirs.add(logDir);
+    const logFile = join(logDir, "lcm.log");
+    // The vitest sandbox env redirects logs; this test exercises the plugin-config path.
+    vi.stubEnv("LCM_LOG_FILE", undefined);
+
+    const { api, getFactory, debugLog, infoLog, sessionInfoLog } = buildApi(
+      {
+        enabled: true,
+        contextThreshold: 0.33,
+        incrementalMaxDepth: -1,
+        freshTailCount: 7,
+        promptAwareEviction: false,
+        leafChunkTokens: 80000,
+        newSessionRetainDepth: 4,
+        dbPath,
+        ignoreSessionPatterns: ["agent:*:cron:**", "agent:main:subagent:**"],
+        statelessSessionPatterns: ["agent:*:subagent:**"],
+        skipStatelessSessions: true,
+        proactiveThresholdCompactionMode: "inline",
+        largeFileThresholdTokens: 12345,
+        independentLogFile: {
+          file: logFile,
+        },
+      },
+      { shouldLogVerbose: true },
+    );
+    lcmPlugin.register(api);
+    expect(api.registerCommand).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: "lcm",
+        nativeNames: expect.objectContaining({
+          default: "lossless",
+        }),
+        nativeProgressMessages: expect.objectContaining({
+          telegram: "Lossless Claw is working...",
+        }),
+      }),
+    );
+
+    const factory = getFactory();
+    expect(factory).toBeTypeOf("function");
+
+    const engine = factory!() as {
+      config: Record<string, unknown>;
+      info?: Record<string, unknown>;
+    };
+    expect(engine.config).toMatchObject({
+      enabled: true,
+      contextThreshold: 0.33,
+      incrementalMaxDepth: -1,
+      freshTailCount: 7,
+      promptAwareEviction: false,
+      newSessionRetainDepth: 4,
+      leafChunkTokens: 80000,
+      databasePath: dbPath,
+      ignoreSessionPatterns: ["agent:*:cron:**", "agent:main:subagent:**"],
+      statelessSessionPatterns: ["agent:*:subagent:**"],
+      skipStatelessSessions: true,
+      proactiveThresholdCompactionMode: "inline",
+      largeFileTokenThreshold: 12345,
+    });
+    expect(engine.info).toMatchObject({
+      id: "lossless-claw",
+      turnMaintenanceMode: "background",
+    });
+    expect(infoLog).toHaveBeenCalledWith(
+      `[lcm] Plugin loaded (enabled=true, db=${dbPath}, threshold=0.33, proactiveThresholdCompactionMode=inline)`,
+    );
+    expect(infoLog).toHaveBeenCalledWith(
+      "[lcm] Proactive threshold compaction mode: inline (default deferred)",
+    );
+    expect(infoLog).toHaveBeenCalledWith(
+      "[lcm] Ignoring sessions matching 2 pattern(s) from plugin config: agent:*:cron:**, agent:main:subagent:**",
+    );
+    expect(infoLog).toHaveBeenCalledWith(
+      "[lcm] Stateless session patterns from plugin config: 1 pattern(s): agent:*:subagent:**",
+    );
+    expect(infoLog).toHaveBeenCalledWith(
+      "[lcm] Compaction summarization model: (unconfigured)",
+    );
+    expect(sessionInfoLog).not.toHaveBeenCalled();
+    expect(debugLog).not.toHaveBeenCalledWith(expect.stringContaining("[lcm] Migration successful"));
+    expect(readFileSync(logFile, "utf8")).toContain("[lcm] Migration successful");
+    expect(api.on).toHaveBeenCalledWith("before_reset", expect.any(Function));
+    expect(api.on).toHaveBeenCalledWith("session_end", expect.any(Function));
+  });
+
+  it("logs env-backed pattern sources and override warnings during register", () => {
+    vi.stubEnv("LCM_IGNORE_SESSION_PATTERNS", "agent:*:cron:*, agent:main:subagent:**");
+    vi.stubEnv("LCM_STATELESS_SESSION_PATTERNS", "agent:*:ephemeral:**");
+
+    const { api, infoLog, warnLog } = buildApi({
+      enabled: true,
+      ignoreSessionPatterns: ["agent:*:test:*"],
+      statelessSessionPatterns: ["agent:*:preview:*"],
+      skipStatelessSessions: true,
+    });
+
+    lcmPlugin.register(api);
+
+    expect(infoLog).toHaveBeenCalledWith(
+      "[lcm] Ignoring sessions matching 2 pattern(s) from env: agent:*:cron:*, agent:main:subagent:**",
+    );
+    expect(infoLog).toHaveBeenCalledWith(
+      "[lcm] Stateless session patterns from env: 1 pattern(s): agent:*:ephemeral:**",
+    );
+    expect(warnLog).toHaveBeenCalledWith(
+      "[lcm] LCM_IGNORE_SESSION_PATTERNS from env overrides plugins.entries.lossless-claw.config.ignoreSessionPatterns; plugin config array will be ignored",
+    );
+    expect(warnLog).toHaveBeenCalledWith(
+      "[lcm] LCM_STATELESS_SESSION_PATTERNS from env overrides plugins.entries.lossless-claw.config.statelessSessionPatterns; plugin config array will be ignored",
+    );
+  });
+
+  it("warns once and ignores retired transcript maintenance settings", () => {
+    const dbPath = join(tmpdir(), `lossless-claw-${Date.now()}-${Math.random().toString(16)}.db`);
+    dbPaths.add(dbPath);
+    const pluginConfig = {
+      enabled: true,
+      dbPath,
+      transcriptGcEnabled: true,
+      autoRotateSessionFiles: {
+        enabled: true,
+        sizeBytes: 4096,
+        startup: "rotate",
+        runtime: "warn",
+      },
+    };
+    const first = buildApi(pluginConfig);
+    const second = buildApi(pluginConfig);
+
+    lcmPlugin.register(first.api);
+    lcmPlugin.register(second.api);
+
+    expect(first.warnLog).toHaveBeenCalledWith(
+      "[lcm] Ignoring retired config key plugins.entries.lossless-claw.config.transcriptGcEnabled. Lossless Claw 1.x does not rewrite OpenClaw transcript storage; remove this key after upgrading.",
+    );
+    expect(first.warnLog).toHaveBeenCalledWith(
+      "[lcm] Ignoring retired config key plugins.entries.lossless-claw.config.autoRotateSessionFiles. Lossless Claw 1.x does not rotate OpenClaw session files; remove this key after upgrading.",
+    );
+    expect(second.warnLog).not.toHaveBeenCalledWith(
+      expect.stringContaining("Ignoring retired config key"),
+    );
+
+    const factory = first.getFactory();
+    expect(factory).toBeTypeOf("function");
+    const engine = factory!() as { config: Record<string, unknown> };
+    expect(engine.config).not.toHaveProperty("transcriptGcEnabled");
+    expect(engine.config).not.toHaveProperty("autoRotateSessionFiles");
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["invalid", ["not-a-plugin-config"]],
+    ["empty", {}],
+  ])(
+    "falls back to root plugin config when api.pluginConfig is %s",
+    (_label, pluginConfig) => {
+      const dbPath = join(tmpdir(), `lossless-claw-${Date.now()}-${Math.random().toString(16)}.db`);
+      dbPaths.add(dbPath);
+
+      const { api, getFactory } = buildApi(pluginConfig);
+      api.config = {
+        plugins: {
+          entries: {
+            "lossless-claw": {
+              config: {
+                enabled: true,
+                contextThreshold: 0.42,
+                freshTailCount: 9,
+                dbPath,
+              },
+            },
+          },
+        },
+      } as OpenClawPluginApi["config"];
+
+      lcmPlugin.register(api);
+
+      const factory = getFactory();
+      expect(factory).toBeTypeOf("function");
+
+      const engine = factory!() as { config: Record<string, unknown> };
+      expect(engine.config).toMatchObject({
+        enabled: true,
+        contextThreshold: 0.42,
+        freshTailCount: 9,
+        databasePath: dbPath,
+      });
+    },
+  );
+
+  it("inherits OpenClaw's default model for summarization when no LCM model override is set", { timeout: 20000 }, () => {
+    const { api, getFactory } = buildApi({
+      enabled: true,
+    });
+    api.config = defaultModelConfig("anthropic/claude-sonnet-4-6") as OpenClawPluginApi["config"];
+
+    lcmPlugin.register(api);
+
+    const factory = getFactory();
+    expect(factory).toBeTypeOf("function");
+
+    const engine = factory!() as { deps?: { resolveModel: (modelRef?: string, providerHint?: string) => unknown } };
+    const resolved = engine.deps?.resolveModel(undefined, undefined) as
+      | { provider: string; model: string }
+      | undefined;
+
+    expect(resolved).toEqual({
+      provider: "anthropic",
+      model: "claude-sonnet-4-6",
+    });
+  });
+
+  it("stores plugin summary overrides in resolved LCM config", () => {
+    const { api, getFactory } = buildApi({
+      enabled: true,
+      summaryModel: "gpt-5.4",
+      summaryProvider: "openai-resp",
+    });
+
+    lcmPlugin.register(api);
+
+    const factory = getFactory();
+    expect(factory).toBeTypeOf("function");
+
+    const engine = factory!() as { config: Record<string, unknown> };
+    expect(engine.config).toMatchObject({
+      summaryModel: "gpt-5.4",
+      summaryProvider: "openai-resp",
+    });
+  });
+
+  it("uses plugin config model override when summaryModel is set", () => {
+    const { api, getFactory } = buildApi({
+      enabled: true,
+      summaryModel: "gpt-5.4",
+      summaryProvider: "openai-resp",
+    });
+    api.config = defaultModelConfig("anthropic/claude-sonnet-4-6") as OpenClawPluginApi["config"];
+
+    lcmPlugin.register(api);
+
+    const factory = getFactory();
+    expect(factory).toBeTypeOf("function");
+
+    const engine = factory!() as { deps?: { resolveModel: (modelRef?: string, providerHint?: string) => unknown } };
+    const resolved = engine.deps?.resolveModel(undefined, undefined) as
+      | { provider: string; model: string }
+      | undefined;
+
+    expect(resolved).toEqual({
+      provider: "openai-resp",
+      model: "gpt-5.4",
+    });
+  });
+
+  it("forwards explicit provider and model fields to runtime subagent runs", async () => {
+    const dbPath = join(tmpdir(), `lossless-claw-${Date.now()}-${Math.random().toString(16)}.db`);
+    dbPaths.add(dbPath);
+
+    const { api, getFactory } = buildApi({
+      enabled: true,
+      dbPath,
+    });
+
+    lcmPlugin.register(api);
+
+    const factory = getFactory();
+    expect(factory).toBeTypeOf("function");
+
+    const engine = factory!() as {
+      deps?: {
+        callGateway: (params: {
+          method: string;
+          params?: Record<string, unknown>;
+        }) => Promise<unknown>;
+      };
+      config: { databasePath: string };
+    };
+    const run = api.runtime.subagent.run as ReturnType<typeof vi.fn>;
+
+    await engine.deps?.callGateway({
+      method: "agent",
+      params: {
+        sessionKey: "agent:main:subagent:test",
+        message: "Test delegated run",
+        provider: "openrouter",
+        model: "anthropic/claude-haiku-4-5",
+        deliver: false,
+        idempotencyKey: "idem-1",
+      },
+    });
+
+    expect(run).toHaveBeenCalledWith(expect.objectContaining({
+      sessionKey: "agent:main:subagent:test",
+      message: "Test delegated run",
+      provider: "openrouter",
+      model: "anthropic/claude-haiku-4-5",
+      deliver: false,
+      idempotencyKey: "idem-1",
+    }));
+  });
+
+  it("routes delegated session cleanup through the runtime subagent adapter", async () => {
+    const dbPath = join(tmpdir(), `lossless-claw-${Date.now()}-${Math.random().toString(16)}.db`);
+    dbPaths.add(dbPath);
+
+    const { api, getFactory } = buildApi({ enabled: true, dbPath });
+    lcmPlugin.register(api);
+
+    const engine = getFactory()!() as {
+      deps?: {
+        callGateway: (params: {
+          method: string;
+          params?: Record<string, unknown>;
+        }) => Promise<unknown>;
+      };
+    };
+    const deleteSession = api.runtime.subagent.deleteSession as ReturnType<typeof vi.fn>;
+
+    await engine.deps?.callGateway({
+      method: "sessions.delete",
+      params: {
+        key: "agent:main:subagent:delegated-expansion",
+        deleteTranscript: true,
+      },
+    });
+
+    expect(deleteSession).toHaveBeenCalledWith({
+      sessionKey: "agent:main:subagent:delegated-expansion",
+      deleteTranscript: true,
+    });
+  });
+
+  it("reads delegated replies through the OpenClaw 2026.7.2 subagent adapter", async () => {
+    const dbPath = join(tmpdir(), `lossless-claw-${Date.now()}-${Math.random().toString(16)}.db`);
+    dbPaths.add(dbPath);
+
+    const { api, getFactory } = buildApi({ enabled: true, dbPath });
+    const getSessionMessages = api.runtime.subagent.getSessionMessages as ReturnType<typeof vi.fn>;
+    getSessionMessages.mockResolvedValue({
+      messages: [{ role: "assistant", content: "completed focus brief" }],
+    });
+    lcmPlugin.register(api);
+
+    const engine = getFactory()!() as {
+      deps?: {
+        callGateway: (params: {
+          method: string;
+          params?: Record<string, unknown>;
+        }) => Promise<unknown>;
+      };
+    };
+
+    const result = await engine.deps?.callGateway({
+      method: "sessions.get",
+      params: {
+        key: "agent:main:subagent:focus",
+        limit: 80,
+      },
+    });
+
+    expect(result).toEqual({
+      messages: [{ role: "assistant", content: "completed focus brief" }],
+    });
+    expect(getSessionMessages).toHaveBeenCalledWith({
+      sessionKey: "agent:main:subagent:focus",
+      limit: 80,
+    });
+  });
+
+  it("prefers env summary overrides over plugin config model overrides", () => {
+    vi.stubEnv("LCM_SUMMARY_PROVIDER", "anthropic");
+    vi.stubEnv("LCM_SUMMARY_MODEL", "claude-3-5-haiku");
+    const { api, getFactory } = buildApi({
+      enabled: true,
+      summaryModel: "gpt-5.4",
+      summaryProvider: "openai-resp",
+    });
+    api.config = defaultModelConfig("anthropic/claude-sonnet-4-6") as OpenClawPluginApi["config"];
+
+    lcmPlugin.register(api);
+
+    const factory = getFactory();
+    expect(factory).toBeTypeOf("function");
+
+    const engine = factory!() as { deps?: { resolveModel: (modelRef?: string, providerHint?: string) => unknown } };
+    const resolved = engine.deps?.resolveModel(undefined, undefined) as
+      | { provider: string; model: string }
+      | undefined;
+
+    expect(resolved).toEqual({
+      provider: "anthropic",
+      model: "claude-3-5-haiku",
+    });
+  });
+  it("uses plugin config model with provider/model format", () => {
+    const { api, getFactory } = buildApi({
+      enabled: true,
+      summaryModel: "openai-resp/gpt-5.4",
+    });
+    api.config = defaultModelConfig("anthropic/claude-sonnet-4-6") as OpenClawPluginApi["config"];
+
+    lcmPlugin.register(api);
+
+    const factory = getFactory();
+    expect(factory).toBeTypeOf("function");
+
+    const engine = factory!() as { deps?: { resolveModel: (modelRef?: string, providerHint?: string) => unknown } };
+    const resolved = engine.deps?.resolveModel(undefined, undefined) as
+      | { provider: string; model: string }
+      | undefined;
+
+    expect(resolved).toEqual({
+      provider: "openai-resp",
+      model: "gpt-5.4",
+    });
+  });
+
+  it("keeps explicit provider hints ahead of plugin summaryProvider", () => {
+    const { api, getFactory } = buildApi({
+      enabled: true,
+      summaryModel: "gpt-5.4",
+      summaryProvider: "openai-resp",
+    });
+    api.config = defaultModelConfig("anthropic/claude-sonnet-4-6") as OpenClawPluginApi["config"];
+
+    lcmPlugin.register(api);
+
+    const factory = getFactory();
+    expect(factory).toBeTypeOf("function");
+
+    const engine = factory!() as { deps?: { resolveModel: (modelRef?: string, providerHint?: string) => unknown } };
+    const resolved = engine.deps?.resolveModel("claude-sonnet-4-6", "anthropic") as
+      | { provider: string; model: string }
+      | undefined;
+
+    expect(resolved).toEqual({
+      provider: "anthropic",
+      model: "gpt-5.4",
+    });
+  });
+
+  it("logs compaction summarization overrides at startup", () => {
+    const { api, infoLog, sessionInfoLog } = buildApi({
+      enabled: true,
+      summaryModel: "gpt-5.4",
+      summaryProvider: "openai-resp",
+    });
+    api.config = defaultModelConfig("anthropic/claude-sonnet-4-6") as OpenClawPluginApi["config"];
+
+    lcmPlugin.register(api);
+
+    expect(infoLog).toHaveBeenCalledWith(
+      "[lcm] Compaction summarization model: openai-resp/gpt-5.4 (override)",
+    );
+    expect(sessionInfoLog).not.toHaveBeenCalled();
+  });
+
+  it("warns when configured summary models need runtime LLM allowlist policy", () => {
+    const { api, warnLog } = buildApi({
+      enabled: true,
+      summaryModel: "openai-codex/gpt-5.5",
+    });
+    api.config = {
+      plugins: {
+        entries: {
+          "lossless-claw": {
+            config: {
+              summaryModel: "openai-codex/gpt-5.5",
+            },
+          },
+        },
+      },
+    } as OpenClawPluginApi["config"];
+
+    lcmPlugin.register(api);
+
+    expect(warnLog).toHaveBeenCalledWith(
+      expect.stringContaining("openclaw doctor --fix"),
+    );
+    expect(warnLog).toHaveBeenCalledWith(
+      expect.stringContaining("summaryModel=openai-codex/gpt-5.5"),
+    );
+    expect(warnLog).toHaveBeenCalledWith(
+      expect.stringContaining("plugins.entries.lossless-claw.llm.allowModelOverride"),
+    );
+  });
+
+  it("does not warn when configured summary models are allowlisted for runtime LLM", () => {
+    const { api, warnLog } = buildApi({
+      enabled: true,
+      summaryModel: "openai-codex/gpt-5.5",
+    });
+    api.config = {
+      plugins: {
+        entries: {
+          "lossless-claw": {
+            config: {
+              summaryModel: "openai-codex/gpt-5.5",
+            },
+            llm: {
+              allowModelOverride: true,
+              allowedModels: ["openai-codex/gpt-5.5"],
+            },
+          },
+        },
+      },
+    } as OpenClawPluginApi["config"];
+
+    lcmPlugin.register(api);
+
+    expect(warnLog).not.toHaveBeenCalledWith(
+      expect.stringContaining("Runtime LLM model override policy"),
+    );
+  });
+
+  it("does not combine summaryProvider with a provider-prefixed summaryModel for runtime LLM policy", () => {
+    const { api, warnLog } = buildApi({
+      enabled: true,
+      summaryProvider: "openai",
+      summaryModel: "openai/gpt-5.5",
+    });
+    api.config = {
+      plugins: {
+        entries: {
+          "lossless-claw": {
+            config: {
+              summaryProvider: "openai",
+              summaryModel: "openai/gpt-5.5",
+            },
+            llm: {
+              allowModelOverride: true,
+              allowedModels: ["openai/gpt-5.5"],
+            },
+          },
+        },
+      },
+    } as OpenClawPluginApi["config"];
+
+    lcmPlugin.register(api);
+
+    expect(warnLog).not.toHaveBeenCalledWith(
+      expect.stringContaining("openai/openai/gpt-5.5"),
+    );
+    expect(warnLog).not.toHaveBeenCalledWith(
+      expect.stringContaining("Runtime LLM model override policy"),
+    );
+  });
+
+  it("uses fallbackProviders provider when checking runtime LLM policy", () => {
+    const { api, warnLog } = buildApi({
+      enabled: true,
+      fallbackProviders: [
+        { provider: "openrouter", model: "anthropic/claude-sonnet-4-6" },
+      ],
+    });
+    api.config = {
+      plugins: {
+        entries: {
+          "lossless-claw": {
+            config: {
+              fallbackProviders: [
+                { provider: "openrouter", model: "anthropic/claude-sonnet-4-6" },
+              ],
+            },
+            llm: {
+              allowModelOverride: true,
+              allowedModels: ["openrouter/anthropic/claude-sonnet-4-6"],
+            },
+          },
+        },
+      },
+    } as OpenClawPluginApi["config"];
+
+    lcmPlugin.register(api);
+
+    expect(warnLog).not.toHaveBeenCalledWith(
+      expect.stringContaining("fallbackProviders=anthropic/claude-sonnet-4-6"),
+    );
+    expect(warnLog).not.toHaveBeenCalledWith(
+      expect.stringContaining("Runtime LLM model override policy"),
+    );
+  });
+
+  it("falls back to runtime plugin config for the startup banner when register runs before api.pluginConfig is populated", () => {
+    const { api, infoLog } = buildApi(
+      {},
+      {
+        runtimeConfig: {
+          plugins: {
+            entries: {
+              "lossless-claw": {
+                enabled: true,
+                config: {
+                  summaryModel: "openai-codex/gpt-5.4",
+                },
+              },
+            },
+          },
+        },
+      },
+    );
+    api.config = {} as OpenClawPluginApi["config"];
+
+    lcmPlugin.register(api);
+
+    expect(infoLog).toHaveBeenCalledWith(
+      "[lcm] Compaction summarization model: openai-codex/gpt-5.4 (override)",
+    );
+  });
+
+  it("prefers runtime config current() over deprecated loadConfig()", () => {
+    const { api, infoLog } = buildApi({});
+    const current = vi.fn(() => ({
+      plugins: {
+        entries: {
+          "lossless-claw": {
+            enabled: true,
+            config: {
+              summaryModel: "openai-codex/gpt-5.5",
+            },
+          },
+        },
+      },
+    }));
+    const loadConfig = vi.fn(() => {
+      throw new Error("deprecated loadConfig should not be called");
+    });
+    (api.runtime as unknown as {
+      config: {
+        current: typeof current;
+        loadConfig: typeof loadConfig;
+      };
+    }).config = { current, loadConfig };
+    api.config = {} as OpenClawPluginApi["config"];
+
+    lcmPlugin.register(api);
+
+    expect(current).toHaveBeenCalled();
+    expect(loadConfig).not.toHaveBeenCalled();
+    expect(infoLog).toHaveBeenCalledWith(
+      "[lcm] Compaction summarization model: openai-codex/gpt-5.5 (override)",
+    );
+  });
+
+  it("uses runtime OpenClaw defaults when api.pluginConfig is ready before api.config", () => {
+    const { api, getFactory, infoLog } = buildApi(
+      {
+        enabled: true,
+      },
+      {
+        runtimeConfig: compactionAndDefaultModelConfig({
+          defaultModel: "anthropic/claude-sonnet-4-6",
+        }),
+      },
+    );
+    api.config = {} as OpenClawPluginApi["config"];
+
+    lcmPlugin.register(api);
+
+    expect(infoLog).toHaveBeenCalledWith(
+      "[lcm] Compaction summarization model: anthropic/claude-sonnet-4-6 (default)",
+    );
+
+    const factory = getFactory();
+    expect(factory).toBeTypeOf("function");
+
+    const engine = factory!() as { deps?: { resolveModel: (modelRef?: string, providerHint?: string) => unknown } };
+    const resolved = engine.deps?.resolveModel(undefined, undefined) as
+      | { provider: string; model: string }
+      | undefined;
+
+    expect(resolved).toEqual({
+      provider: "anthropic",
+      model: "claude-sonnet-4-6",
+    });
+  });
+
+  it("logs the OpenClaw compaction model at startup when no plugin override is set", () => {
+    const { api, infoLog } = buildApi({
+      enabled: true,
+    });
+    api.config = compactionAndDefaultModelConfig({
+      compactionModel: "anthropic/claude-opus-4-6",
+      defaultModel: "openai-codex/gpt-5.4",
+    }) as OpenClawPluginApi["config"];
+    lcmPlugin.register(api);
+
+    expect(infoLog).toHaveBeenCalledWith(
+      "[lcm] Compaction summarization model: anthropic/claude-opus-4-6 (override)",
+    );
+  });
+
+  it("prefers env summary overrides over the OpenClaw compaction model in the startup banner", () => {
+    vi.stubEnv("LCM_SUMMARY_PROVIDER", "openai-codex");
+    vi.stubEnv("LCM_SUMMARY_MODEL", "gpt-5.4");
+    const { api, infoLog } = buildApi({
+      enabled: true,
+    });
+    api.config = compactionAndDefaultModelConfig({
+      compactionModel: "anthropic/claude-opus-4-6",
+      defaultModel: "openai-codex/gpt-5.3-codex",
+    }) as OpenClawPluginApi["config"];
+    lcmPlugin.register(api);
+
+    expect(infoLog).toHaveBeenCalledWith(
+      "[lcm] Compaction summarization model: openai-codex/gpt-5.4 (override)",
+    );
+  });
+
+  it("dedupes startup banner logs across repeated registration and engine construction", () => {
+    const dbPath = join(tmpdir(), `lossless-claw-${Date.now()}-${Math.random().toString(16)}.db`);
+    dbPaths.add(dbPath);
+    const logDir = mkdtempSync(join(tmpdir(), "lossless-claw-plugin-log-"));
+    tempDirs.add(logDir);
+    const logFile = join(logDir, "lcm.log");
+    // The vitest sandbox env redirects logs; this test exercises the plugin-config path.
+    vi.stubEnv("LCM_LOG_FILE", undefined);
+
+    const pluginConfig = {
+      enabled: true,
+      contextThreshold: 0.33,
+      dbPath,
+      ignoreSessionPatterns: ["agent:*:cron:**", "agent:main:subagent:**"],
+      statelessSessionPatterns: ["agent:*:subagent:**"],
+      skipStatelessSessions: true,
+      proactiveThresholdCompactionMode: "deferred",
+      independentLogFile: {
+        file: logFile,
+      },
+    };
+    const first = buildApi(pluginConfig, { shouldLogVerbose: true });
+    const second = buildApi(pluginConfig, { shouldLogVerbose: true });
+    lcmPlugin.register(first.api);
+    lcmPlugin.register(second.api);
+
+    const firstFactory = first.getFactory();
+    const secondFactory = second.getFactory();
+
+    expect(firstFactory).toBeTypeOf("function");
+    expect(secondFactory).toBeTypeOf("function");
+
+    firstFactory!();
+    secondFactory!();
+
+    const firstMessages = first.infoLog.mock.calls.map(([message]) => message);
+    const secondMessages = second.infoLog.mock.calls.map(([message]) => message);
+    const firstSessionMessages = first.sessionInfoLog.mock.calls.map(([message]) => message);
+    const secondSessionMessages = second.sessionInfoLog.mock.calls.map(([message]) => message);
+    const debugMessages = first.debugLog.mock.calls.map(([message]) => message);
+    const startupBannerMessages = [...firstMessages, ...secondMessages].filter((message) =>
+      [
+        "[lcm] Plugin loaded (enabled=true, db=",
+        "[lcm] Proactive threshold compaction mode:",
+        "[lcm] Compaction summarization model:",
+        "[lcm] Ignoring sessions matching ",
+        "[lcm] Stateless session patterns",
+      ].some((prefix) => message.startsWith(prefix)),
+    );
+
+    expect(startupBannerMessages.sort()).toEqual([
+      `[lcm] Plugin loaded (enabled=true, db=${dbPath}, threshold=0.33, proactiveThresholdCompactionMode=deferred)`,
+      "[lcm] Proactive threshold compaction mode: deferred (default deferred)",
+      "[lcm] Compaction summarization model: (unconfigured)",
+      "[lcm] Ignoring sessions matching 2 pattern(s) from plugin config: agent:*:cron:**, agent:main:subagent:**",
+      "[lcm] Stateless session patterns from plugin config: 1 pattern(s): agent:*:subagent:**",
+    ].sort());
+    expect(firstSessionMessages).toEqual([]);
+    expect(secondSessionMessages).toEqual([]);
+    expect(debugMessages).toEqual(
+      expect.not.arrayContaining([expect.stringContaining("[lcm] Migration successful")]),
+    );
+    expect(readFileSync(logFile, "utf8")).toContain("[lcm] Migration successful");
+    expect(firstMessages).toEqual(
+      expect.not.arrayContaining([expect.stringContaining("[lcm] Migration successful")]),
+    );
+  });
+  it("registers with a clear warning when runtime.llm is unavailable", () => {
+    const { api, getFactory, warnLog } = buildApi(
+      {
+        enabled: true,
+      },
+      { includeRuntimeLlm: false },
+    );
+    api.config = defaultModelConfig("anthropic/claude-sonnet-4-6") as OpenClawPluginApi["config"];
+
+    expect(() => lcmPlugin.register(api)).not.toThrow();
+    expect(getFactory()).toBeTypeOf("function");
+    expect(warnLog).toHaveBeenCalledWith(
+      expect.stringContaining("runtime.llm.complete is unavailable"),
+    );
+  });
+
+  it("does not expose direct provider credential lookup through dependencies", () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "env-anthropic-key");
+
+    const { api, getFactory } = buildApi({
+      enabled: true,
+    });
+    api.config = defaultModelConfig("anthropic/claude-sonnet-4-6") as OpenClawPluginApi["config"];
+
+    lcmPlugin.register(api);
+
+    const factory = getFactory();
+    expect(factory).toBeTypeOf("function");
+
+    const engine = factory!() as {
+      deps?: Record<string, unknown>;
+    };
+    expect(engine.deps).not.toHaveProperty("getApiKey");
+    expect(engine.deps).not.toHaveProperty("requireApiKey");
+  });
+  it("waits for gateway_start when eager init hits a lock", async () => {
+    const dbPath = join(tmpdir(), `lossless-claw-${Date.now()}-${Math.random().toString(16)}.db`);
+    dbPaths.add(dbPath);
+
+    const { api, getFactory, getHook } = buildApi({
+      enabled: true,
+      dbPath,
+    });
+    const originalCreate = connectionModule.createLcmDatabaseConnection;
+    const createSpy = vi.spyOn(connectionModule, "createLcmDatabaseConnection");
+    createSpy.mockImplementation((path: string) => {
+      if (createSpy.mock.calls.length === 1) {
+        throw new Error("database is locked");
+      }
+      return originalCreate(path);
+    });
+
+    lcmPlugin.register(api);
+
+    const factory = getFactory();
+    const gatewayStart = getHook("gateway_start");
+    expect(factory).toBeTypeOf("function");
+    expect(gatewayStart).toBeTypeOf("function");
+
+    let settled = false;
+    const enginePromise = Promise.resolve(factory!()).then((engine) => {
+      settled = true;
+      return engine as { config?: { databasePath?: string } };
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+
+    await gatewayStart?.({ port: 3000 }, { port: 3000 });
+    await expect(enginePromise).resolves.toMatchObject({
+      config: {
+        databasePath: dbPath,
+      },
+    });
+  });
+
+  it("surfaces deferred init failures after gateway_start runs", async () => {
+    const dbPath = join(tmpdir(), `lossless-claw-${Date.now()}-${Math.random().toString(16)}.db`);
+    dbPaths.add(dbPath);
+
+    const { api, getFactory, getHook } = buildApi({
+      enabled: true,
+      dbPath,
+    });
+    const createSpy = vi.spyOn(connectionModule, "createLcmDatabaseConnection");
+    createSpy.mockImplementation(() => {
+      if (createSpy.mock.calls.length === 1) {
+        throw new Error("database is locked");
+      }
+      throw new Error("deferred init exploded");
+    });
+
+    lcmPlugin.register(api);
+
+    const factory = getFactory();
+    const gatewayStart = getHook("gateway_start");
+    expect(factory).toBeTypeOf("function");
+    expect(gatewayStart).toBeTypeOf("function");
+
+    const enginePromise = Promise.resolve(factory!());
+    await gatewayStart?.({ port: 3000 }, { port: 3000 });
+
+    await expect(enginePromise).rejects.toThrow("deferred init exploded");
+    await expect(Promise.resolve(factory!())).rejects.toThrow("deferred init exploded");
+  });
+
+  it("reuses singleton DB and engine when register() is called twice with the same dbPath", () => {
+    const dbPath = join(tmpdir(), `lossless-claw-${Date.now()}-${Math.random().toString(16)}.db`);
+    dbPaths.add(dbPath);
+
+    const createSpy = vi.spyOn(connectionModule, "createLcmDatabaseConnection");
+
+    const { api: api1 } = buildApi({ enabled: true, dbPath });
+    lcmPlugin.register(api1);
+    expect(createSpy).toHaveBeenCalledTimes(1);
+
+    const { api: api2 } = buildApi({ enabled: true, dbPath });
+    lcmPlugin.register(api2);
+    // Second register with same path should NOT open a new connection
+    expect(createSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens a fresh connection after gateway_stop clears singleton", async () => {
+    const dbPath = join(tmpdir(), `lossless-claw-${Date.now()}-${Math.random().toString(16)}.db`);
+    dbPaths.add(dbPath);
+
+    const createSpy = vi.spyOn(connectionModule, "createLcmDatabaseConnection");
+
+    const { api: api1, getHook: getHook1 } = buildApi({ enabled: true, dbPath });
+    lcmPlugin.register(api1);
+    expect(createSpy).toHaveBeenCalledTimes(1);
+
+    // Simulate gateway_stop
+    const gatewayStop = getHook1("gateway_stop");
+    await gatewayStop?.({}, {});
+
+    // After stop, a new register should open a fresh connection
+    const { api: api2 } = buildApi({ enabled: true, dbPath });
+    lcmPlugin.register(api2);
+    expect(createSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["restart", "shutdown"])(
+    "does not acquire the stopped engine for session_end %s",
+    async (reason) => {
+      const dbPath = join(tmpdir(), `lossless-claw-${Date.now()}-${Math.random().toString(16)}.db`);
+      dbPaths.add(dbPath);
+
+      const { api, getHook } = buildApi({ enabled: true, dbPath });
+      lcmPlugin.register(api);
+
+      const gatewayStop = getHook("gateway_stop");
+      const sessionEnd = getHook("session_end");
+      expect(gatewayStop).toBeTypeOf("function");
+      expect(sessionEnd).toBeTypeOf("function");
+
+      await gatewayStop?.({}, {});
+
+      await expect(
+        sessionEnd?.(
+          {
+            reason: ` ${reason} `,
+            sessionId: "session-before-restart",
+            sessionKey: "agent:main:main",
+          },
+          {},
+        ),
+      ).resolves.toBeUndefined();
+    },
+  );
+
+  it("delegates ordinary session_end reasons to the context engine", async () => {
+    const dbPath = join(tmpdir(), `lossless-claw-${Date.now()}-${Math.random().toString(16)}.db`);
+    dbPaths.add(dbPath);
+    const handleSessionEnd = vi
+      .spyOn(LcmContextEngine.prototype, "handleSessionEnd")
+      .mockResolvedValue(undefined);
+
+    const { api, getHook } = buildApi({ enabled: true, dbPath });
+    lcmPlugin.register(api);
+
+    const sessionEnd = getHook("session_end");
+    expect(sessionEnd).toBeTypeOf("function");
+
+    await sessionEnd?.(
+      {
+        reason: "deleted",
+        sessionId: "session-before-delete",
+        sessionKey: "agent:main:main",
+      },
+      {},
+    );
+
+    expect(handleSessionEnd).toHaveBeenCalledWith({
+      reason: "deleted",
+      sessionId: "session-before-delete",
+      sessionKey: "agent:main:main",
+      nextSessionId: undefined,
+      nextSessionKey: undefined,
+    });
+  });
+
+  it("reopens the retained context-engine factory on the next gateway lifecycle", async () => {
+    const dbPath = join(tmpdir(), `lossless-claw-${Date.now()}-${Math.random().toString(16)}.db`);
+    dbPaths.add(dbPath);
+
+    const createSpy = vi.spyOn(connectionModule, "createLcmDatabaseConnection");
+    const { api, getFactory, getHook } = buildApi({ enabled: true, dbPath });
+    lcmPlugin.register(api);
+
+    const retainedFactory = getFactory();
+    const gatewayStop = getHook("gateway_stop");
+    expect(retainedFactory).toBeTypeOf("function");
+    expect(gatewayStop).toBeTypeOf("function");
+    await expect(Promise.resolve(retainedFactory!())).resolves.toBeDefined();
+
+    await gatewayStop?.({}, {});
+
+    const gatewayStart = getHook("gateway_start");
+    expect(gatewayStart).toBeTypeOf("function");
+    await gatewayStart?.({ port: 3000 }, { port: 3000 });
+
+    await expect(Promise.resolve(retainedFactory!())).resolves.toBeDefined();
+    expect(api.registerContextEngine).toHaveBeenCalledTimes(1);
+    expect(createSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("refreshes the OpenClaw default model for a retained factory restart", async () => {
+    const dbPath = join(tmpdir(), `lossless-claw-${Date.now()}-${Math.random().toString(16)}.db`);
+    dbPaths.add(dbPath);
+    const runtimeConfig = {
+      agents: { defaults: { model: { primary: "openai/model-a" } } },
+    };
+    const { api, getFactory, getHook } = buildApi(
+      { enabled: true, databasePath: dbPath },
+      { runtimeConfig },
+    );
+    lcmPlugin.register(api);
+
+    const retainedFactory = getFactory();
+    const firstEngine = (await Promise.resolve(retainedFactory!())) as {
+      deps?: { resolveModel: (modelRef?: string, providerHint?: string) => unknown };
+    };
+    expect(firstEngine.deps?.resolveModel(undefined, undefined)).toEqual({
+      provider: "openai",
+      model: "model-a",
+    });
+
+    runtimeConfig.agents.defaults.model.primary = "anthropic/model-b";
+    await getHook("gateway_stop")?.({}, {});
+    await getHook("gateway_start")?.({ port: 3000 }, { port: 3000 });
+
+    const restartedEngine = (await Promise.resolve(retainedFactory!())) as {
+      deps?: { resolveModel: (modelRef?: string, providerHint?: string) => unknown };
+    };
+    expect(restartedEngine.deps?.resolveModel(undefined, undefined)).toEqual({
+      provider: "anthropic",
+      model: "model-b",
+    });
+  });
+
+  it("retries retained-factory initialization after a failed gateway lifecycle", async () => {
+    const dbPath = join(tmpdir(), `lossless-claw-${Date.now()}-${Math.random().toString(16)}.db`);
+    dbPaths.add(dbPath);
+
+    const originalCreate = connectionModule.createLcmDatabaseConnection;
+    const createSpy = vi.spyOn(connectionModule, "createLcmDatabaseConnection");
+    createSpy.mockImplementation((path: string) => {
+      if (createSpy.mock.calls.length === 2) {
+        throw new Error("database is locked");
+      }
+      return originalCreate(path);
+    });
+
+    const { api, getFactory, getHook } = buildApi({ enabled: true, dbPath });
+    lcmPlugin.register(api);
+    const retainedFactory = getFactory();
+    const gatewayStop = getHook("gateway_stop");
+    const gatewayStart = getHook("gateway_start");
+
+    await gatewayStop?.({}, {});
+    await gatewayStart?.({ port: 3000 }, { port: 3000 });
+    await expect(Promise.resolve(retainedFactory!())).rejects.toThrow(
+      "Database connection closed after gateway_stop",
+    );
+
+    await gatewayStop?.({}, {});
+    await gatewayStart?.({ port: 3000 }, { port: 3000 });
+
+    await expect(Promise.resolve(retainedFactory!())).resolves.toBeDefined();
+    expect(api.registerContextEngine).toHaveBeenCalledTimes(1);
+    expect(createSpy).toHaveBeenCalledTimes(3);
+  });
+});

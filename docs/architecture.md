@@ -1,0 +1,281 @@
+# Architecture
+
+This document describes how lossless-claw works internally — the data model, compaction lifecycle, context assembly, and expansion system.
+
+## Data model
+
+### Conversations and messages
+
+Every OpenClaw session maps to a **conversation**. The first time a session ingests a message, LCM creates a conversation record keyed by the runtime session ID.
+
+Messages are stored with:
+- **seq** — Monotonically increasing sequence number within the conversation
+- **role** — `user`, `assistant`, `system`, or `tool`
+- **content** — Plain text extraction of the message
+- **tokenCount** — Estimated token count (~4 chars/token)
+- **createdAt** — Insertion timestamp
+
+Each message also has **message_parts** — structured content blocks that preserve the original shape (text blocks, tool calls, tool results, reasoning, file content, etc.). This allows the assembler to reconstruct rich content when building model context, not just flat text.
+
+### The summary DAG
+
+Summaries form a directed acyclic graph with two node types:
+
+**Leaf summaries** (depth 0, kind `"leaf"`):
+- Created from a chunk of raw messages
+- Linked to source messages via `summary_messages`
+- Contain a narrative summary with timestamps
+- Typically 800–1200 tokens
+
+**Condensed summaries** (depth 1+, kind `"condensed"`):
+- Created from a chunk of summaries at the same depth
+- Linked to parent summaries via `summary_parents`
+- Each depth tier uses a progressively more abstract prompt
+- Typically 1500–2000 tokens
+
+Every summary carries:
+- **summaryId** — `sum_` + 16 hex chars (SHA-256 of content + timestamp)
+- **conversationId** — Which conversation it belongs to
+- **depth** — Position in the hierarchy (0 = leaf)
+- **earliestAt / latestAt** — Time range of source material
+- **descendantCount** — Total number of ancestor summaries (transitive)
+- **fileIds** — References to large files mentioned in the source
+- **tokenCount** — Estimated tokens
+
+### Context items
+
+The **context_items** table maintains the ordered list of what the model sees for each conversation. Each entry is either a message reference or a summary reference, identified by ordinal.
+
+When compaction creates a summary from a range of messages (or summaries), the source items are replaced by a single summary item. This keeps the context list compact while preserving ordering.
+
+## Compaction lifecycle
+
+### Ingestion
+
+The OpenClaw transcript is the log; LCM stores a projection of it plus a per-conversation watermark, the opaque cursor returned by OpenClaw's visible-message delta reader. Every lifecycle hook that ingests reads only the delta after that cursor and commits the new rows together with the advanced cursor in one SQLite transaction:
+
+1. **bootstrap** — Drains the delta up to OpenClaw's current-turn fence, so the turn being prepared is not stored early. A conversation with no rows imports the newest `bootstrapMaxTokens` of history after the latest same-session `/reset`.
+2. **commitTurn** / **afterTurn** — Drain the delta (which now includes the finished turn), then evaluate whether `contextThreshold` requires compaction. `commitTurn` records its idempotency receipt in the transaction that stores the final cursor. Runtime message arrays are never persisted.
+3. **ingest** / **ingestBatch** — Drain the delta for transcript-backed sessions instead of persisting their payloads.
+
+When OpenClaw invalidates a cursor (for example after an in-place rewrite rotates the transcript generation), LCM resyncs in bulk: one query for the stored transcript entry ids, a payload-free scan of the visible projection, and imports only after the last known entry. Re-issued entries are restamped onto their existing rows instead of being imported again. Resync only adds or re-issues transcript entry ids; it never clears an id or deletes a row.
+
+A conversation created before cursor mode migrates on its first sync with the same bulk resync: it anchors on the last stored entry id that is still visible, stamps unstamped rows after that anchor when their content matches in order, imports only entries after the anchor, and records the frontier cursor. History before the anchor that was never stored stays unimported, so nothing is appended out of order. When such history forms a run of storable entries with no stored row between its neighbors, resync records a history-gap marker in `conversation_transcript_gaps` and logs one warning with the counts. `/lcm status`, `/lcm doctor`, `lcm status`, and `lcm conversations show` report these gaps. Markers are diagnostics only and never change ingestion or assembly. After `/reset`, the replacement conversation imports only messages after the reset boundary.
+
+lossless-claw requires OpenClaw's `readSessionTranscriptVisibleMessageDelta`. Every supported OpenClaw release ships it; if a host lacks it, lossless-claw logs a capability error and skips transcript ingestion rather than falling back to full-transcript reconciliation.
+
+Each drained page also records the host replay key (`idempotencyKey`) and a signature digest of every visible user entry in `transcript_user_replay_keys`. A resync refreshes those records from its scan, and records no key for stored entries that left the projection. Assembly restores raw user replay identity from these records, so it does not read the whole visible transcript on every turn. Only entries that were never recorded, such as rows stored before this table existed, are filled from one full visible read.
+
+### Leaf compaction
+
+The **leaf pass** converts raw messages into leaf summaries:
+
+1. Identify the oldest contiguous chunk of raw messages outside the **fresh tail** (protected recent messages).
+2. Cap the chunk at `leafChunkTokens` (default 20k tokens).
+3. Concatenate message content with timestamps.
+4. Resolve the most recent prior summary for continuity (passed as `previous_context` so the LLM avoids repeating known information).
+5. Send to OpenClaw's host-owned `runtime.llm.complete` capability with the leaf prompt.
+6. Normalize runtime LLM response text into plain text while preserving provider/model diagnostics from the host result.
+7. If normalization is empty, log provider/model diagnostics and fall back to deterministic truncation.
+8. If the summary is larger than the input (LLM failure), retry with the aggressive prompt. If still too large, fall back to deterministic truncation.
+9. Persist the summary, link to source messages, and replace the message range in context_items.
+
+### Condensation
+
+The **condensed pass** merges summaries at the same depth into a higher-level summary:
+
+1. Find the shallowest depth with enough contiguous same-depth summaries (≥ `leafMinFanout` for d0, ≥ `condensedMinFanout` for d1+).
+2. Concatenate their content with time range headers.
+3. Send to the LLM with the depth-appropriate prompt (d1, d2, or d3+).
+4. Apply the same escalation strategy (normal → aggressive → truncation fallback).
+5. Persist with depth = targetDepth + 1, link to parent summaries, replace the range in context_items.
+
+### Compaction modes
+
+**Automatic threshold sweep (after each turn):**
+- Checks if the assembled context crosses `contextThreshold`
+- Below threshold, does not compact and does not record leaf debt
+- In deferred mode, records one `"threshold"` maintenance row for host-owned background `maintain()` or foreground recovery before pressure-driven eviction
+- Below threshold, eligible raw history can be prepared as hidden pending summaries during background `maintain()`; this does not publish them or record threshold debt
+- At a compaction event, the longest contiguous ready prefix can publish atomically, even when later chunks or higher-level condensation are unfinished. Publication uses no model calls and remains available during generation cooldown
+- Partial publication preserves uncovered context and the protected fresh tail. Pending suffixes retain their prepared content; unfinished parents read promoted children from canonical summaries. The batch stays active until its remaining preparation and publication finish
+- Background preparation returns its full promise to the host and uses that maintenance call's LLM capability. Turn hooks only record data-only requests; no detached timers inherit a completed turn's async scope
+- Each maintenance invocation runs one bounded pass. Unfinished nodes and threshold debt resume on a later pass. Model calls do not hold the foreground ingestion queue; publication still uses the session lock
+- Host lifecycle rejection is not a provider failure: a closed async work scope leaves work retryable instead of producing a deterministic fallback summary
+- In inline mode, runs a full sweep before `afterTurn()` completes
+
+**Foreground pressure recovery (before assembly eviction):**
+- Measures the full assembled projection, including serialized payloads, restored replay metadata, and uncovered volatile live inputs. Stored estimates cannot hide pressure that appears during rendering
+- Measures in provider prompt units: host-only envelope fields (usage, timestamps, response IDs, diagnostics, tool-result `details`) and opaque replay signatures such as encrypted reasoning are not counted, because providers do not tokenize them. A live assistant message still counts at least its provider-measured completion size, matching the host's prompt precheck
+- Above 75% of the assembly budget with pending debt, or the 90% serialized clamp threshold without debt, takes the session queue and first publishes usable prepared summaries with zero model calls
+- If pressure still exceeds the configured `contextThreshold` target (capped at the serialized safety target), runs one bounded prepare-only pass and another publication opportunity. `maxSweepIterations`, summarizer timeouts, spend limits, and cooldowns still apply
+- Does not start generation while background maintenance owns preparation. It never waits for a background publisher while holding the session queue
+- Rebuilds and remeasures canonical context after publication. Remaining pressure or pending work retains maintenance debt; publication alone is not proof that the target was reached
+- Keeps the canonical summary projection when recovery reaches its target, including targets above the 75% degraded-context trigger. Foreground recovery finishes its own debt during preparation-only background work; an active debt drain retains ownership of its maintenance row
+- Logs reduction, target attainment, and the blocker. Protected-tail pressure, unavailable summarization, or exhausted work limits leave the bounded assembly fallback in place. Original messages, parts, and summary lineage remain persisted
+- The bounded live fallback keeps its window head fixed across tool-loop requests while the suffix from that head still fits the budget, so the provider prompt cache survives. When the head must move, the window is trimmed to 60% of the budget so the next move is several requests away
+
+**Full sweep (threshold, manual `/compact`, or overflow):**
+- Phase 1: Repeatedly runs leaf passes until no more eligible chunks
+- Phase 2: If the summarized prefix is above `summaryPrefixTargetTokens`, repeatedly runs condensation passes starting from the shallowest eligible depth, respecting the preferred `sweepMaxDepth` (`0` for leaf-only, `-1` for unlimited)
+- Pressure phase: If summarized-prefix pressure remains, condensation may go beyond `sweepMaxDepth` using the hard fanout floor
+- Each pass checks for progress; stops if no tokens were saved
+
+**Budget-targeted (`compactUntilUnder`):**
+- Runs up to `maxRounds` (default 10) of full sweeps
+- Stops when context is under the target token count
+- Used by the overflow recovery path
+- Forced recovery targets the resolved `contextThreshold`, leaving the configured threshold margin below a raw host context window for response reserve
+
+### Three-level escalation
+
+Every summarization attempt follows this escalation:
+
+1. **Normal** — Standard prompt, temperature 0.2
+2. **Aggressive** — Tighter prompt requesting only durable facts, temperature 0.1, lower target tokens
+3. **Fallback** — Deterministic truncation to ~512 tokens with `[Truncated for context management]` marker
+
+This ensures compaction always makes progress, even if the LLM produces poor output.
+
+## Context assembly
+
+The assembler runs before each model turn and builds the message array:
+
+```
+[summary₁, summary₂, ..., summaryₙ, message₁, message₂, ..., messageₘ]
+ ├── budget-constrained ──┤  ├──── fresh tail (always included) ────┤
+```
+
+### Steps
+
+1. Fetch all context_items ordered by ordinal.
+2. Resolve each item — summaries become user messages with XML wrappers; messages are reconstructed from parts.
+3. Split into evictable prefix and protected fresh tail (last `freshTailCount` raw messages).
+4. Compute fresh tail token cost (always included, even if over budget).
+5. Fill remaining budget from the evictable set. By default this keeps newest older items and drops the oldest; when `promptAwareEviction` is enabled and a searchable prompt is present, the evictable prefix is ranked by prompt relevance first and then restored to chronological order.
+6. Normalize assistant content to array blocks (Anthropic API compatibility).
+7. Sanitize tool-use/result pairing (ensures every tool_result has a matching tool_use).
+
+### XML summary format
+
+Summaries are presented to the model as user messages wrapped in XML:
+
+```xml
+<summary id="sum_abc123" kind="leaf" depth="0" descendant_count="0"
+         earliest_at="2026-02-17T07:37:00" latest_at="2026-02-17T08:23:00">
+  <content>
+    ...summary text with timestamps...
+
+    Expand for details about: exact error messages, full config diff, intermediate debugging steps
+  </content>
+</summary>
+```
+
+Condensed summaries also include parent references:
+
+```xml
+<summary id="sum_def456" kind="condensed" depth="1" descendant_count="8" ...>
+  <parents>
+    <summary_ref id="sum_aaa111" />
+    <summary_ref id="sum_bbb222" />
+  </parents>
+  <content>...</content>
+</summary>
+```
+
+The XML attributes give the model enough metadata to reason about summary age, scope, and how to drill deeper. The `<parents>` section enables targeted expansion of specific source summaries.
+
+## Expansion system
+
+When summaries are too compressed for a task, agents use `lcm_expand_query` to recover detail.
+
+### How it works
+
+1. Agent calls `lcm_expand_query` with a `prompt` and either `summaryIds` or a `query`.
+2. If `query` is provided, `lcm_grep` finds matching summaries first.
+3. A **delegation grant** is created, scoping the sub-agent to the relevant conversation(s) with a token cap.
+4. A sub-agent session is spawned with the expansion task.
+5. The sub-agent walks the DAG: it can read summary content, follow parent links, access source messages, and inspect stored files.
+6. The sub-agent returns a focused answer (default ≤ 2000 tokens) with cited summary IDs.
+7. The grant is revoked and the sub-agent session is cleaned up.
+
+### Security model
+
+Expansion uses a delegation grant system:
+
+- **Grants** are created at spawn time, scoped to specific conversation IDs
+- **Token caps** limit how much content the sub-agent can access
+- **TTL** ensures grants expire even if cleanup fails
+- **Revocation** happens on completion, cancellation, or sweep
+- **Storage**: grants and their child-session bindings live in the LCM database (`lcm_expansion_grants`, `lcm_expansion_grant_bindings`), so a child keeps its grant when a plugin reload moves it to a new plugin generation. Grants are authorization tokens, not conversation data; rows are pruned an hour after they expire
+
+The sub-agent only gets `lcm_expand` (the low-level tool), not `lcm_expand_query` — preventing recursive sub-agent spawning.
+
+## Large file handling
+
+Files embedded in user messages (typically via `<file>` blocks from tool output) are checked at ingestion:
+
+1. Parse file blocks from message content.
+2. For each block exceeding `largeFileTokenThreshold` (default 25k tokens):
+   - Generate a unique file ID (`file_` prefix)
+   - Store the content to `largeFilesDir/<conversation_id>/<file_id>.<ext>` (default `~/.openclaw/lcm-files/...`)
+   - Generate a ~200 token exploration summary (structural analysis, key sections, etc.)
+   - Insert a `large_files` record with metadata
+   - Replace the file block in the message with a compact reference
+3. The `lcm_describe` tool can retrieve bounded file content by ID, and `lcm_grep(scope="files")` can search the first 512,000 bytes of externalized text files.
+
+This prevents a single large file paste from consuming the entire context window while keeping the content accessible.
+
+## Bootstrap import
+
+LCM handles startup continuity through **bootstrap import**:
+
+1. On session start, OpenClaw supplies the visible transcript entries for the current runtime session target.
+2. Lossless stores messages that do not already exist in the LCM database, using stable transcript entry ids to avoid replay.
+3. Imported messages are trimmed by `bootstrapMaxTokens` for first-time or fork bootstrap paths so a long parent history cannot flood a child conversation.
+4. The conversation is marked bootstrapped after the visible projection is imported or confirmed already present.
+
+This keeps active runtime storage host-owned. OpenClaw owns SQLite transcript parsing, branch visibility, and session-target resolution; Lossless persists only the conversation, message, summary, and recall rows it needs for compaction.
+
+For forked child sessions, LCM imports only the newest visible entries that fit
+within `bootstrapMaxTokens`. The remaining fork-continuity contract belongs to
+the host: when lossless-claw advertises the `subagent-spawn` requirement for
+`thread-bootstrap-projection`, OpenClaw should bootstrap the child model thread
+from the context-engine projection rather than from unbounded raw parent
+history.
+
+## Operation serialization
+
+All mutating operations (ingest, compact) are serialized per-session using a promise queue. This prevents races between concurrent afterTurn/compact calls for the same conversation without blocking operations on different conversations.
+
+## Plugin reload
+
+OpenClaw can reload lossless-claw while the Gateway keeps running. Each reload stops and disposes the old plugin instance, then loads a fresh copy of the plugin module. State that a later call depends on therefore lives in SQLite, not in module memory:
+
+- transcript cursors, commit receipts, pending summaries, and compaction debt
+- delegated expansion grants and their child-session bindings
+- the host's input provenance for runtime-authored user turns. OpenClaw marks its continuation prompt with `provenance: { kind: "internal_system" }` and `display: false`. LCM keeps both fields in part metadata and restores them on assembly, so the prompt is not replayed as a message the user typed. These fields are not part of message identity, so rows stored before this change still match.
+
+Some in-memory state is rebuilt after a reload. Losing it degrades behavior but does not break it: queued maintenance hints (the durable debt row stays authoritative), assembly-prefix diagnostics, the auth circuit breaker, and the summary spend limiter. A Gateway restart resets the same state.
+
+Teardown closes the database and drops the process-wide shared engine for this database path. It runs on `gateway_stop` and, on OpenClaw 2026.9.5 or later, from `api.lifecycle.onDispose` once the last plugin registration that shares the database has been disposed. lossless-claw starts no long-lived workers or timers; summarization runs inside host-owned maintenance calls.
+
+## Runtime LLM boundary
+
+LCM needs model inference for summarization, but it does not resolve provider credentials, base URLs, or provider transport settings directly. Summarization calls go through OpenClaw's `runtime.llm.complete` capability, which owns model preparation, credential resolution, OAuth refresh, provider dispatch, and usage attribution.
+
+Configured Lossless summary model overrides (`summaryModel`, `largeFileSummaryModel`, and `fallbackProviders`) are sent as runtime LLM model override requests. OpenClaw enforces those requests with `plugins.entries.lossless-claw.llm.allowModelOverride` and `plugins.entries.lossless-claw.llm.allowedModels`; denied overrides fail closed instead of silently falling back to a different model.
+
+## Stable event identity
+
+The `messages` table carries a `stable_event_key` column (TEXT, nullable)
+indexed by a partial unique index `(conversation_id, stable_event_key)
+WHERE stable_event_key IS NOT NULL`. The key is computed at
+`ingestSingle` time from a message's `responseId` or a single
+`toolCallId` and acts as a third identity axis alongside
+`transcript_entry_id` and `identity_hash`. Aggregate tool-result messages
+and messages without either stable identifier continue to use the
+existing identity-hash and redaction-aware deduplication. When a message
+with a key that is already present for the conversation is ingested, the
+duplicate is rejected before any side effects (large-file interception,
+parts, context items) so the originally-persisted row stays canonical.

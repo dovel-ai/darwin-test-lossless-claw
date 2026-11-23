@@ -1,0 +1,1964 @@
+import type { DatabaseSync } from "node:sqlite";
+import { randomUUID } from "node:crypto";
+import { withDatabaseTransaction } from "../transaction-mutex.js";
+import { appendConversationScopeConstraint } from "./conversation-scope.js";
+import { sanitizeFts5Query } from "./fts5-sanitize.js";
+import { buildLikeSearchPlan, containsCjk, createFallbackSnippet } from "./full-text-fallback.js";
+import { buildMessageIdentityHash } from "./message-identity.js";
+import { parseUtcTimestamp, parseUtcTimestampOrNull } from "./parse-utc-timestamp.js";
+import { buildFtsOrderBy, type SearchSort } from "./full-text-sort.js";
+import { compileSafeSearchRegex } from "./search-regex.js";
+import { normalizeMessageContentForFullTextIndex } from "./message-fts-content.js";
+import {
+  resolveSearchScanLimits,
+  type SearchOutcome,
+  type SearchScanLimits,
+} from "./search-scan.js";
+import {
+  parseOpenClawSenderMetadata,
+  serializeOpenClawSenderMetadata,
+  type OpenClawSenderMetadata,
+} from "../openclaw-sender-metadata.js";
+
+export type ConversationId = number;
+export type MessageId = number;
+export type SummaryId = string;
+export type MessageRole = "system" | "user" | "assistant" | "tool";
+export type TranscriptAnchorTrustState =
+  | "verified"
+  | "repaired"
+  | "suspect"
+  | "legacy_prefix"
+  | "unproven";
+export type MessagePartType =
+  | "text"
+  | "reasoning"
+  | "tool"
+  | "patch"
+  | "file"
+  | "subtask"
+  | "compaction"
+  | "step_start"
+  | "step_finish"
+  | "snapshot"
+  | "agent"
+  | "retry";
+
+export type CreateMessageInput = {
+  conversationId: ConversationId;
+  seq: number;
+  role: MessageRole;
+  content: string;
+  tokenCount: number;
+  /** Allowlisted OpenClaw sender identity for group-message replay. */
+  openClawSenderMetadata?: OpenClawSenderMetadata | null;
+  identityHash?: string;
+  /**
+   * Optional historical message timestamp, used by transcript recovery imports.
+   * Runtime ingests omit this and keep the store's current timestamp behavior.
+   */
+  createdAt?: Date | string;
+  /**
+   * Stable JSONL envelope id of the transcript entry this message was
+   * imported from. Enforced unique per conversation (partial index), so
+   * transcript replays cannot duplicate rows. Null/undefined for runtime
+   * ingests and envelope-less transcripts.
+   */
+  transcriptEntryId?: string | null;
+  /**
+   * Cross-representation stable event identity (responseId or provider-minted
+   * toolCallId) used to short-circuit duplicate ingestion when the transcript
+   * and live runtime batch describe the same semantic event.
+   * Null/undefined preserves the existing behavior.
+   */
+  stableEventKey?: string | null;
+  // Use only when the caller is intentionally importing a fresh transcript epoch.
+  skipReplayTimestampFloodGuard?: boolean;
+};
+
+type PreparedMessageInsert = CreateMessageInput & {
+  createdAt: string;
+  identityHash: string;
+  stableEventKey: string | null;
+};
+
+type ExternalReplayFloodGroup = {
+  scope: "external";
+  conversationId: ConversationId;
+  role: "user";
+  createdAt: string;
+  candidateCount: number;
+};
+
+type InternalReplayFloodGroup = {
+  scope: "internal";
+  conversationId: ConversationId;
+  role: Exclude<MessageRole, "user">;
+  content: string;
+  identityHash: string;
+  createdAt: string;
+  candidateCount: number;
+};
+
+type ReplayFloodGroup = ExternalReplayFloodGroup | InternalReplayFloodGroup;
+
+export type MessageRecord = {
+  messageId: MessageId;
+  conversationId: ConversationId;
+  seq: number;
+  role: MessageRole;
+  content: string;
+  tokenCount: number;
+  createdAt: Date;
+  /**
+   * v4.2 §B — non-null when the row has been stratified into a
+   * stubbable payload via lcm-blob-migrate.mjs. Stores the externalized
+   * `file_xxx` id (in `large_files`); the assembler reads this to
+   * decide whether an evictable tool result can be replaced with a
+   * compact `[LCM Tool Output: file_xxx | …]` reference.
+   */
+  largeContent: string | null;
+  /**
+   * Transcript provenance: non-null only when the row was imported from a
+   * transcript envelope written by the host's own flush — a marker a user
+   * cannot forge. Covered-frontier dedup requires it before a metadata-body
+   * match may support alignment; an independent replay anchor is still
+   * required before collapse.
+   */
+  transcriptEntryId: string | null;
+  /** Allowlisted OpenClaw sender identity, or null for legacy/direct messages. */
+  openClawSenderMetadata: OpenClawSenderMetadata | null;
+};
+
+export type UpsertMessageTranscriptAnchorTrustInput = {
+  messageId: MessageId;
+  conversationId: ConversationId;
+  transcriptEntryId?: string | null;
+  trustState: TranscriptAnchorTrustState;
+  source: string;
+  reason?: string | null;
+  verifiedAt?: Date | string | null;
+};
+
+export type TranscriptEntryAnchorCandidate = {
+  messageId: MessageId;
+  conversationId: ConversationId;
+  transcriptEntryId: string;
+  role: MessageRole;
+  content: string;
+};
+
+export type CreateMessagePartInput = {
+  sessionId: string;
+  partType: MessagePartType;
+  ordinal: number;
+  textContent?: string | null;
+  toolCallId?: string | null;
+  toolName?: string | null;
+  toolInput?: string | null;
+  toolOutput?: string | null;
+  metadata?: string | null;
+};
+
+export type MessagePartRecord = {
+  partId: string;
+  messageId: MessageId;
+  sessionId: string;
+  partType: MessagePartType;
+  ordinal: number;
+  textContent: string | null;
+  toolCallId: string | null;
+  toolName: string | null;
+  toolInput: string | null;
+  toolOutput: string | null;
+  metadata: string | null;
+};
+
+export type CreateConversationInput = {
+  sessionId: string;
+  sessionKey?: string;
+  title?: string;
+  active?: boolean;
+  archivedAt?: Date | null;
+};
+
+export type ConversationRecord = {
+  conversationId: ConversationId;
+  sessionId: string;
+  sessionKey: string | null;
+  active: boolean;
+  archivedAt: Date | null;
+  title: string | null;
+  bootstrappedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+/** Normalized provenance for a conversation archive, set at the archive funnel. */
+export type ArchiveCause =
+  | "manual-reset"
+  | "session-deleted"
+  | "session-end"
+  | "rollover-fallback"
+  | "cron-rotation";
+
+// Causes the rollover-split doctor must never auto-restore. Ships with
+// `manual-reset` only: a deliberate operator wipe is rock-solid intent. The other
+// causes are recorded but stay merge-eligible because the safe direction is
+// over-restore (today's behavior); promoting `session-deleted` once the host
+// deletion contract is confirmed is a one-line follow-up.
+export const DELIBERATE_ARCHIVE_CAUSES: ReadonlySet<ArchiveCause> = new Set(["manual-reset"]);
+
+export type MessageSearchInput = {
+  conversationId?: ConversationId;
+  conversationIds?: ConversationId[];
+  query: string;
+  mode: "regex" | "full_text";
+  since?: Date;
+  before?: Date;
+  limit?: number;
+  sort?: SearchSort;
+};
+
+export type MessageSearchResult = {
+  messageId: MessageId;
+  conversationId: ConversationId;
+  role: MessageRole;
+  snippet: string;
+  createdAt: Date;
+  rank?: number;
+};
+
+// ── DB row shapes (snake_case) ────────────────────────────────────────────────
+
+interface ConversationRow {
+  conversation_id: number;
+  session_id: string;
+  session_key: string | null;
+  active: number;
+  archived_at: string | null;
+  title: string | null;
+  bootstrapped_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface MessageRow {
+  message_id: number;
+  conversation_id: number;
+  seq: number;
+  role: MessageRole;
+  content: string;
+  token_count: number;
+  created_at: string;
+  // v4.2 §B — sidecar fileId column. Optional in row shape because not
+  // every SELECT projects it; mappers tolerate undefined → null.
+  large_content?: string | null;
+  // Transcript provenance: non-null only for rows imported from a transcript
+  // envelope (the host's own flush). Same optional-projection tolerance.
+  transcript_entry_id?: string | null;
+  // Allowlisted OpenClaw sender envelope fields, serialized as JSON.
+  openclaw_sender_metadata?: string | null;
+}
+
+interface TranscriptEntryAnchorCandidateRow {
+  message_id: number;
+  conversation_id: number;
+  transcript_entry_id: string;
+  role: MessageRole;
+  content: string;
+}
+
+interface MessagePartRow {
+  part_id: string;
+  message_id: number;
+  session_id: string;
+  part_type: MessagePartType;
+  ordinal: number;
+  text_content: string | null;
+  tool_call_id: string | null;
+  tool_name: string | null;
+  tool_input: string | null;
+  tool_output: string | null;
+  metadata: string | null;
+}
+
+interface CountRow {
+  count: number;
+}
+
+interface TimestampRow {
+  created_at: string;
+}
+
+interface MaxSeqRow {
+  max_seq: number;
+}
+
+// ── Row mappers ───────────────────────────────────────────────────────────────
+
+function toConversationRecord(row: ConversationRow): ConversationRecord {
+  return {
+    conversationId: row.conversation_id,
+    sessionId: row.session_id,
+    sessionKey: row.session_key ?? null,
+    active: row.active === 1,
+    archivedAt: parseUtcTimestampOrNull(row.archived_at),
+    title: row.title,
+    bootstrappedAt: parseUtcTimestampOrNull(row.bootstrapped_at),
+    createdAt: parseUtcTimestamp(row.created_at),
+    updatedAt: parseUtcTimestamp(row.updated_at),
+  };
+}
+
+function formatMessageCreatedAt(value: Date | string | undefined): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value instanceof Date) {
+    return Number.isFinite(value.getTime())
+      ? value.toISOString().slice(0, 19).replace("T", " ")
+      : undefined;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  const parsed = parseUtcTimestampOrNull(trimmed);
+  if (parsed && Number.isFinite(parsed.getTime())) {
+    return parsed.toISOString().slice(0, 19).replace("T", " ");
+  }
+  return undefined;
+}
+
+function toMessageRecord(row: MessageRow): MessageRecord {
+  return {
+    largeContent: row.large_content ?? null,
+    transcriptEntryId: row.transcript_entry_id ?? null,
+    openClawSenderMetadata: parseOpenClawSenderMetadata(row.openclaw_sender_metadata),
+    messageId: row.message_id,
+    conversationId: row.conversation_id,
+    seq: row.seq,
+    role: row.role,
+    content: row.content,
+    tokenCount: row.token_count,
+    createdAt: parseUtcTimestamp(row.created_at),
+  };
+}
+
+function formatNullableTimestamp(value: Date | string | null | undefined): string | null {
+  if (value == null) {
+    return null;
+  }
+  if (value instanceof Date) {
+    return Number.isFinite(value.getTime()) ? value.toISOString() : null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function toTranscriptEntryAnchorCandidate(
+  row: TranscriptEntryAnchorCandidateRow,
+): TranscriptEntryAnchorCandidate {
+  return {
+    messageId: row.message_id,
+    conversationId: row.conversation_id,
+    transcriptEntryId: row.transcript_entry_id,
+    role: row.role,
+    content: row.content,
+  };
+}
+
+function toMessagePartRecord(row: MessagePartRow): MessagePartRecord {
+  return {
+    partId: row.part_id,
+    messageId: row.message_id,
+    sessionId: row.session_id,
+    partType: row.part_type,
+    ordinal: row.ordinal,
+    textContent: row.text_content,
+    toolCallId: row.tool_call_id,
+    toolName: row.tool_name,
+    toolInput: row.tool_input,
+    toolOutput: row.tool_output,
+    metadata: row.metadata,
+  };
+}
+
+type MessageScanRow = {
+  message_id: number;
+  conversation_id: number;
+  role: MessageRole;
+  content: string;
+  created_at: string;
+};
+
+/** Executes message searches somewhere other than the store's own connection. */
+export type MessageSearchExecutor = {
+  searchMessages(input: MessageSearchInput): Promise<SearchOutcome<MessageSearchResult>>;
+};
+
+/** Append inclusive-since / exclusive-before filters on a message timestamp column. */
+function appendMessageTimeConstraints(
+  where: string[],
+  args: Array<string | number>,
+  columnExpr: string,
+  since?: Date,
+  before?: Date,
+): void {
+  if (since) {
+    where.push(`julianday(${columnExpr}) >= julianday(?)`);
+    args.push(since.toISOString());
+  }
+  if (before) {
+    where.push(`julianday(${columnExpr}) < julianday(?)`);
+    args.push(before.toISOString());
+  }
+}
+
+/** Return rows in the order of `ids`, dropping ids with no row. */
+function orderRowsByIds<T extends { message_id: number }>(rows: T[], ids: number[]): T[] {
+  const byId = new Map(rows.map((row) => [row.message_id, row]));
+  const ordered: T[] = [];
+  for (const id of ids) {
+    const row = byId.get(id);
+    if (row) {
+      ordered.push(row);
+    }
+  }
+  return ordered;
+}
+
+// ── ConversationStore ─────────────────────────────────────────────────────────
+
+export class ConversationStore {
+  private readonly fts5Available: boolean;
+  private readonly searchScanLimits: SearchScanLimits;
+  private searchExecutor: MessageSearchExecutor | null = null;
+  private readonly replayFloodThresholdExternal: number;
+  private readonly replayFloodThresholdInternal: number;
+  private readonly onStableEventKeyConflict?: (info: {
+    conversationId: ConversationId;
+    stableEventKey: string;
+  }) => void;
+
+  constructor(
+    private db: DatabaseSync,
+    options?: {
+      fts5Available?: boolean;
+      /**
+       * Anti-replay threshold for EXTERNAL-input roles (currently `user`).
+       * Defaults to 3 (legacy behaviour).
+       */
+      replayFloodThresholdExternal?: number;
+      /**
+       * Anti-replay threshold for INTERNAL-runtime roles
+       * (`tool` | `assistant` | `system`). Defaults to 32 to absorb legitimate
+       * fast-burst idempotent retries (e.g. cron sub-agent making many tool
+       * calls returning identical results within the same SQLite-second).
+       */
+      replayFloodThresholdInternal?: number;
+      /** Report when a colliding stable key must be dropped to preserve a row. */
+      onStableEventKeyConflict?: (info: {
+        conversationId: ConversationId;
+        stableEventKey: string;
+      }) => void;
+      /** Bounds for regex and LIKE content scans. */
+      searchScanLimits?: Partial<SearchScanLimits>;
+    },
+  ) {
+    this.fts5Available = options?.fts5Available ?? true;
+    this.searchScanLimits = resolveSearchScanLimits(options?.searchScanLimits);
+    this.replayFloodThresholdExternal = options?.replayFloodThresholdExternal ?? 3;
+    this.replayFloodThresholdInternal = options?.replayFloodThresholdInternal ?? 32;
+    this.onStableEventKeyConflict = options?.onStableEventKeyConflict;
+  }
+
+  /** Route searchMessages through `executor`, or back in-process with null. */
+  setSearchExecutor(executor: MessageSearchExecutor | null): void {
+    this.searchExecutor = executor;
+  }
+
+  // ── Transaction helpers ──────────────────────────────────────────────────
+
+  async withTransaction<T>(operation: () => Promise<T> | T): Promise<T> {
+    return withDatabaseTransaction(this.db, "BEGIN IMMEDIATE", operation);
+  }
+
+  // ── Conversation operations ───────────────────────────────────────────────
+
+  async createConversation(input: CreateConversationInput): Promise<ConversationRecord> {
+    try {
+      const result = this.db
+        .prepare(
+          `INSERT INTO conversations (session_id, session_key, active, archived_at, title)
+           VALUES (?, ?, ?, ?, ?)`,
+        )
+        .run(
+          input.sessionId,
+          input.sessionKey ?? null,
+          input.active === false ? 0 : 1,
+          input.archivedAt?.toISOString() ?? null,
+          input.title ?? null,
+        );
+
+      const row = this.db
+        .prepare(
+          `SELECT conversation_id, session_id, session_key, active, archived_at, title, bootstrapped_at, created_at, updated_at
+         FROM conversations WHERE conversation_id = ?`,
+        )
+        .get(Number(result.lastInsertRowid)) as unknown as ConversationRow;
+
+      return toConversationRecord(row);
+    } catch (err: unknown) {
+      // Handle UNIQUE constraint race: another writer created the conversation first
+      if (
+        err instanceof Error &&
+        /UNIQUE constraint failed|SQLITE_CONSTRAINT_UNIQUE/i.test(err.message)
+      ) {
+        if (input.sessionKey) {
+          const existing = await this.getConversationBySessionKey(input.sessionKey);
+          if (existing) return existing;
+        }
+        const existing = await this.getActiveConversationBySessionId(input.sessionId);
+        if (existing) return existing;
+      }
+      throw err;
+    }
+  }
+
+  async getConversation(conversationId: ConversationId): Promise<ConversationRecord | null> {
+    const row = this.db
+      .prepare(
+        `SELECT conversation_id, session_id, session_key, active, archived_at, title, bootstrapped_at, created_at, updated_at
+       FROM conversations WHERE conversation_id = ?`,
+      )
+      .get(conversationId) as unknown as ConversationRow | undefined;
+
+    return row ? toConversationRecord(row) : null;
+  }
+
+  async getConversationBySessionId(sessionId: string): Promise<ConversationRecord | null> {
+    const row = this.db
+      .prepare(
+        `SELECT conversation_id, session_id, session_key, active, archived_at, title, bootstrapped_at, created_at, updated_at
+       FROM conversations
+       WHERE session_id = ?
+       ORDER BY active DESC, created_at DESC
+       LIMIT 1`,
+      )
+      .get(sessionId) as unknown as ConversationRow | undefined;
+
+    return row ? toConversationRecord(row) : null;
+  }
+
+  private async getActiveConversationBySessionId(
+    sessionId: string,
+  ): Promise<ConversationRecord | null> {
+    const row = this.db
+      .prepare(
+        `SELECT conversation_id, session_id, session_key, active, archived_at, title, bootstrapped_at, created_at, updated_at
+       FROM conversations
+       WHERE session_id = ?
+         AND active = 1
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      )
+      .get(sessionId) as unknown as ConversationRow | undefined;
+
+    return row ? toConversationRecord(row) : null;
+  }
+
+  async getConversationBySessionKey(sessionKey: string): Promise<ConversationRecord | null> {
+    const row = this.db
+      .prepare(
+        `SELECT conversation_id, session_id, session_key, active, archived_at, title, bootstrapped_at, created_at, updated_at
+       FROM conversations
+       WHERE session_key = ?
+         AND active = 1
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      )
+      .get(sessionKey) as unknown as ConversationRow | undefined;
+
+    return row ? toConversationRecord(row) : null;
+  }
+
+  async getConversationFamilyIds(input: {
+    conversationId?: ConversationId;
+    sessionId?: string;
+    sessionKey?: string;
+  }): Promise<ConversationId[]> {
+    const baseConversation =
+      input.conversationId != null
+        ? await this.getConversation(input.conversationId)
+        : await this.getConversationForSession({
+            sessionId: input.sessionId,
+            sessionKey: input.sessionKey,
+          });
+    if (!baseConversation) {
+      return [];
+    }
+
+    const normalizedSessionKey = baseConversation.sessionKey?.trim();
+    if (normalizedSessionKey) {
+      const rows = this.db
+        .prepare(
+          `SELECT conversation_id
+           FROM conversations
+           WHERE session_key = ?
+           ORDER BY active DESC, created_at DESC, conversation_id DESC`,
+        )
+        .all(normalizedSessionKey) as Array<{ conversation_id: number }>;
+      return rows.map((row) => row.conversation_id);
+    }
+
+    const rows = this.db
+      .prepare(
+        `SELECT conversation_id
+         FROM conversations
+         WHERE session_id = ?
+         ORDER BY active DESC, created_at DESC, conversation_id DESC`,
+      )
+      .all(baseConversation.sessionId) as Array<{ conversation_id: number }>;
+    return rows.map((row) => row.conversation_id);
+  }
+
+  /** Resolve a conversation by stable session identity. */
+  async getConversationForSession(input: {
+    sessionId?: string;
+    sessionKey?: string;
+  }): Promise<ConversationRecord | null> {
+    const normalizedSessionKey = input.sessionKey?.trim();
+    if (normalizedSessionKey) {
+      const byKey = await this.getConversationBySessionKey(normalizedSessionKey);
+      if (byKey) {
+        return byKey;
+      }
+    }
+
+    const normalizedSessionId = input.sessionId?.trim();
+    if (!normalizedSessionId) {
+      return null;
+    }
+
+    return this.getActiveConversationBySessionId(normalizedSessionId);
+  }
+
+  /** List active conversations that may own live session storage. */
+  async listActiveConversations(limit?: number): Promise<ConversationRecord[]> {
+    const normalizedLimit =
+      typeof limit === "number" && Number.isFinite(limit) && limit > 0
+        ? Math.floor(limit)
+        : 1000;
+    const rows = this.db
+      .prepare(
+        `SELECT conversation_id, session_id, session_key, active, archived_at, title, bootstrapped_at, created_at, updated_at
+         FROM conversations
+         WHERE active = 1
+         ORDER BY updated_at DESC, conversation_id DESC
+         LIMIT ?`,
+      )
+      .all(normalizedLimit) as unknown as ConversationRow[];
+
+    return rows.map(toConversationRecord);
+  }
+
+  async getOrCreateConversation(
+    sessionId: string,
+    titleOrOpts?: string | { title?: string; sessionKey?: string },
+  ): Promise<ConversationRecord> {
+    const opts = typeof titleOrOpts === "string" ? { title: titleOrOpts } : titleOrOpts ?? {};
+    const normalizedSessionKey = opts.sessionKey?.trim();
+    if (normalizedSessionKey) {
+      const byKey = await this.getConversationBySessionKey(normalizedSessionKey);
+      if (byKey) {
+        if (byKey.sessionId !== sessionId) {
+          this.db
+            .prepare(
+              `UPDATE conversations SET session_id = ?, updated_at = datetime('now') WHERE conversation_id = ?`,
+            )
+            .run(sessionId, byKey.conversationId);
+          byKey.sessionId = sessionId;
+        }
+        return byKey;
+      }
+    }
+
+    const existing = await this.getActiveConversationBySessionId(sessionId);
+    if (existing) {
+      if (!normalizedSessionKey) {
+        return existing;
+      }
+      if (existing.active && !existing.sessionKey) {
+        this.db
+          .prepare(
+            `UPDATE conversations SET session_key = ?, updated_at = datetime('now') WHERE conversation_id = ?`,
+          )
+          .run(normalizedSessionKey, existing.conversationId);
+        existing.sessionKey = normalizedSessionKey;
+        return existing;
+      }
+      if (existing.active && existing.sessionKey === normalizedSessionKey) {
+        return existing;
+      }
+    }
+
+    return this.createConversation({ sessionId, title: opts.title, sessionKey: normalizedSessionKey });
+  }
+
+  async markConversationBootstrapped(conversationId: ConversationId): Promise<void> {
+    this.db
+      .prepare(
+        `UPDATE conversations
+       SET bootstrapped_at = COALESCE(bootstrapped_at, datetime('now')),
+           updated_at = datetime('now')
+       WHERE conversation_id = ?`,
+      )
+      .run(conversationId);
+  }
+
+  // Single archive funnel: deliberate archives must flow through here with their
+  // cause. The direct-insert archived-row path (createConversation active:false)
+  // leaves archive_cause NULL = merge-eligible by design.
+  async archiveConversation(conversationId: ConversationId, cause: ArchiveCause): Promise<void> {
+    this.db
+      .prepare(
+        `UPDATE conversations
+       SET active = 0,
+           archived_at = COALESCE(archived_at, datetime('now')),
+           archive_cause = COALESCE(archive_cause, ?),
+           updated_at = datetime('now')
+       WHERE conversation_id = ?`,
+      )
+      .run(cause, conversationId);
+  }
+
+  async rebindConversationSession(
+    conversationId: ConversationId,
+    sessionId: string,
+    sessionKey?: string | null,
+  ): Promise<ConversationRecord | null> {
+    const normalizedSessionId = sessionId.trim();
+    const normalizedSessionKey = sessionKey?.trim() || null;
+    if (!normalizedSessionId) {
+      return this.getConversation(conversationId);
+    }
+    this.db
+      .prepare(
+        `UPDATE conversations
+         SET session_id = ?,
+             session_key = COALESCE(?, session_key),
+             active = 1,
+             archived_at = NULL,
+             updated_at = datetime('now')
+         WHERE conversation_id = ?`,
+      )
+      .run(normalizedSessionId, normalizedSessionKey, conversationId);
+    return this.getConversation(conversationId);
+  }
+
+  // ── Message operations ────────────────────────────────────────────────────
+
+  /**
+   * Insert one prepared row, retrying without its stable key when the unique
+   * identity assumption is violated. The row remains durable while later
+   * dedup becomes conservative, which is the lossless failure direction.
+   */
+  private runMessageInsert(prepared: PreparedMessageInsert): number {
+    const insert = (stableEventKey: string | null): number => {
+      const result = this.db
+        .prepare(
+          `INSERT INTO messages (conversation_id, seq, role, content, token_count, identity_hash, openclaw_sender_metadata, transcript_entry_id, stable_event_key, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          prepared.conversationId,
+          prepared.seq,
+          prepared.role,
+          prepared.content,
+          prepared.tokenCount,
+          prepared.identityHash,
+          serializeOpenClawSenderMetadata(prepared.openClawSenderMetadata),
+          prepared.transcriptEntryId ?? null,
+          stableEventKey,
+          prepared.createdAt,
+        );
+      return Number(result.lastInsertRowid);
+    };
+
+    if (prepared.stableEventKey == null) {
+      return insert(null);
+    }
+    try {
+      return insert(prepared.stableEventKey);
+    } catch (error: unknown) {
+      const isStableKeyConflict =
+        error instanceof Error &&
+        /UNIQUE constraint failed|SQLITE_CONSTRAINT_UNIQUE/i.test(error.message) &&
+        error.message.includes("stable_event_key");
+      if (!isStableKeyConflict) {
+        throw error;
+      }
+
+      const messageId = insert(null);
+      this.onStableEventKeyConflict?.({
+        conversationId: prepared.conversationId,
+        stableEventKey: prepared.stableEventKey,
+      });
+      return messageId;
+    }
+  }
+
+  async createMessage(input: CreateMessageInput): Promise<MessageRecord> {
+    const prepared = this.prepareMessageInsert(input);
+    if (!prepared.skipReplayTimestampFloodGuard) {
+      this.assertNoReplayTimestampFlood([prepared]);
+    }
+
+    const messageId = this.runMessageInsert(prepared);
+
+    this.indexMessageForFullText(messageId, input.content);
+
+    const row = this.db
+      .prepare(
+        `SELECT message_id, conversation_id, seq, role, content, token_count, created_at, large_content, transcript_entry_id, openclaw_sender_metadata
+       FROM messages WHERE message_id = ?`,
+      )
+      .get(messageId) as unknown as MessageRow;
+
+    return toMessageRecord(row);
+  }
+
+  async createMessagesBulk(inputs: CreateMessageInput[]): Promise<MessageRecord[]> {
+    if (inputs.length === 0) {
+      return [];
+    }
+    const createdAt = this.currentSqliteTimestamp();
+    const preparedInputs = inputs.map((input) => this.prepareMessageInsert(input, createdAt));
+    this.assertNoReplayTimestampFlood(
+      preparedInputs.filter((input) => !input.skipReplayTimestampFloodGuard),
+    );
+
+    const selectStmt = this.db.prepare(
+      `SELECT message_id, conversation_id, seq, role, content, token_count, created_at, large_content, transcript_entry_id, openclaw_sender_metadata
+       FROM messages WHERE message_id = ?`,
+    );
+
+    const records: MessageRecord[] = [];
+    for (const input of preparedInputs) {
+      const messageId = this.runMessageInsert(input);
+      this.indexMessageForFullText(messageId, input.content);
+      const row = selectStmt.get(messageId) as unknown as MessageRow;
+      records.push(toMessageRecord(row));
+    }
+
+    return records;
+  }
+
+  async getMessages(
+    conversationId: ConversationId,
+    opts?: { afterSeq?: number; limit?: number },
+  ): Promise<MessageRecord[]> {
+    const afterSeq = opts?.afterSeq ?? -1;
+    const limit = opts?.limit;
+
+    if (limit != null) {
+      const rows = this.db
+        .prepare(
+          `SELECT message_id, conversation_id, seq, role, content, token_count, created_at, large_content, transcript_entry_id, openclaw_sender_metadata
+         FROM messages
+         WHERE conversation_id = ? AND seq > ?
+         ORDER BY seq
+         LIMIT ?`,
+        )
+        .all(conversationId, afterSeq, limit) as unknown as MessageRow[];
+      return rows.map(toMessageRecord);
+    }
+
+    const rows = this.db
+      .prepare(
+        `SELECT message_id, conversation_id, seq, role, content, token_count, created_at, large_content, transcript_entry_id, openclaw_sender_metadata
+       FROM messages
+       WHERE conversation_id = ? AND seq > ?
+       ORDER BY seq`,
+      )
+      .all(conversationId, afterSeq) as unknown as MessageRow[];
+    return rows.map(toMessageRecord);
+  }
+
+  /** Last `count` messages in seq order (oldest of the tail first). */
+  async getLastMessages(conversationId: ConversationId, count: number): Promise<MessageRecord[]> {
+    if (count <= 0) {
+      return [];
+    }
+    const rows = this.db
+      .prepare(
+        `SELECT message_id, conversation_id, seq, role, content, token_count, created_at, large_content, transcript_entry_id, openclaw_sender_metadata
+       FROM messages
+       WHERE conversation_id = ?
+       ORDER BY seq DESC
+       LIMIT ?`,
+      )
+      .all(conversationId, Math.floor(count)) as unknown as MessageRow[];
+    return rows.reverse().map(toMessageRecord);
+  }
+
+  async getLastMessage(conversationId: ConversationId): Promise<MessageRecord | null> {
+    const row = this.db
+      .prepare(
+        `SELECT message_id, conversation_id, seq, role, content, token_count, created_at, large_content, transcript_entry_id, openclaw_sender_metadata
+       FROM messages
+       WHERE conversation_id = ?
+       ORDER BY seq DESC
+       LIMIT 1`,
+      )
+      .get(conversationId) as unknown as MessageRow | undefined;
+
+    return row ? toMessageRecord(row) : null;
+  }
+
+  /** Return the persisted identity hash for the newest message in a conversation. */
+  async getLastMessageIdentityHash(conversationId: ConversationId): Promise<string | null> {
+    const row = this.db
+      .prepare(
+        `SELECT identity_hash FROM messages
+       WHERE conversation_id = ?
+       ORDER BY seq DESC
+       LIMIT 1`,
+      )
+      .get(conversationId) as { identity_hash: string | null } | undefined;
+    return row?.identity_hash ?? null;
+  }
+
+  /** Return the newest `limit` persisted identity hashes in ascending seq order. */
+  async getRecentMessageIdentityHashes(
+    conversationId: ConversationId,
+    limit: number,
+  ): Promise<string[]> {
+    const rows = this.db
+      .prepare(
+        `SELECT identity_hash FROM messages
+       WHERE conversation_id = ?
+       ORDER BY seq DESC
+       LIMIT ?`,
+      )
+      .all(conversationId, limit) as { identity_hash: string | null }[];
+    return rows
+      .map((r) => r.identity_hash)
+      .filter((h): h is string => h !== null)
+      .reverse();
+  }
+
+  async hasMessage(
+    conversationId: ConversationId,
+    role: MessageRole,
+    content: string,
+  ): Promise<boolean> {
+    const identityHash = buildMessageIdentityHash(role, content);
+    const row = this.db
+      .prepare(
+        `SELECT 1 AS count
+       FROM messages
+       WHERE conversation_id = ? AND identity_hash = ? AND role = ? AND content = ?
+       LIMIT 1`,
+      )
+      .get(conversationId, identityHash, role, content) as unknown as CountRow | undefined;
+
+    return row?.count === 1;
+  }
+
+  async hasMessageByTranscriptEntryId(
+    conversationId: ConversationId,
+    transcriptEntryId: string,
+  ): Promise<boolean> {
+    const row = this.db
+      .prepare(
+        `SELECT 1 AS count
+       FROM messages
+       WHERE conversation_id = ? AND transcript_entry_id = ?
+       LIMIT 1`,
+      )
+      .get(conversationId, transcriptEntryId) as unknown as CountRow | undefined;
+
+    return row?.count === 1;
+  }
+
+  /** Return the stored row currently claiming one transcript entry id. */
+  async getTranscriptEntryAnchorCandidate(
+    conversationId: ConversationId,
+    transcriptEntryId: string,
+  ): Promise<TranscriptEntryAnchorCandidate | null> {
+    const normalizedTranscriptEntryId = transcriptEntryId.trim();
+    if (!normalizedTranscriptEntryId) {
+      return null;
+    }
+    const row = this.db
+      .prepare(
+        `SELECT message_id, conversation_id, transcript_entry_id, role, content
+         FROM messages
+         WHERE conversation_id = ? AND transcript_entry_id = ?
+         LIMIT 1`,
+      )
+      .get(conversationId, normalizedTranscriptEntryId) as
+      | TranscriptEntryAnchorCandidateRow
+      | undefined;
+    return row ? toTranscriptEntryAnchorCandidate(row) : null;
+  }
+
+  /** Clear a false transcript id association while preserving the message row. */
+  async clearTranscriptEntryIdForMessage(
+    conversationId: ConversationId,
+    messageId: MessageId,
+  ): Promise<boolean> {
+    const result = this.db
+      .prepare(
+        `UPDATE messages
+         SET transcript_entry_id = NULL
+         WHERE conversation_id = ? AND message_id = ?`,
+      )
+      .run(conversationId, messageId);
+    return result.changes > 0;
+  }
+
+  /**
+   * Whether this conversation already holds a message with the given
+   * stable event key (responseId / toolCallId). Used by `ingestSingle`
+   * to short-circuit cross-representation duplicates.
+   */
+  async hasMessageByStableEventKey(
+    conversationId: ConversationId,
+    stableEventKey: string,
+  ): Promise<boolean> {
+    const row = this.db
+      .prepare(
+        `SELECT 1 AS count
+       FROM messages
+       WHERE conversation_id = ? AND stable_event_key = ?
+       LIMIT 1`,
+      )
+      .get(conversationId, stableEventKey) as unknown as CountRow | undefined;
+
+    return row?.count === 1;
+  }
+
+  /**
+   * Tier-1 replay-twin gate for the append-only reconcile path: does this
+   * conversation already hold a row with the same role, identity hash, and
+   * created_at SECOND as the candidate? An indexed point lookup
+   * (messages_conv_identity_hash_idx), no file read. A miss proves the candidate
+   * is genuinely new content, so the append-only fast path proceeds untouched; a
+   * hit is ambiguous (a re-append twin OR a legitimate same-second repeat) and
+   * the caller resolves it at full inner-timestamp precision.
+   */
+  async hasPersistedIdentityAtCreatedAtSecond(
+    conversationId: ConversationId,
+    role: MessageRole,
+    content: string,
+    createdAt: Date | string | undefined,
+  ): Promise<boolean> {
+    const createdAtSecond = formatMessageCreatedAt(createdAt);
+    if (!createdAtSecond) {
+      return false;
+    }
+    const identityHash = buildMessageIdentityHash(role, content);
+    const row = this.db
+      .prepare(
+        `SELECT 1 AS count
+       FROM messages
+       WHERE conversation_id = ? AND identity_hash = ? AND role = ? AND created_at = ?
+       LIMIT 1`,
+      )
+      .get(conversationId, identityHash, role, createdAtSecond) as unknown as CountRow | undefined;
+
+    return row?.count === 1;
+  }
+
+  /**
+   * Replace a row's stale transcript entry id with the id the host re-issued
+   * for the same message. Missing user sender identity is enriched from the
+   * new envelope without overwriting existing metadata. Returns false when
+   * the new id already exists for the conversation (unique-index race:
+   * another path imported it first).
+   */
+  async restampTranscriptEntryId(
+    messageId: number,
+    transcriptEntryId: string,
+    openClawSenderMetadata?: OpenClawSenderMetadata | null,
+  ): Promise<boolean> {
+    try {
+      const serializedSenderMetadata = serializeOpenClawSenderMetadata(
+        openClawSenderMetadata,
+      );
+      const result = this.db
+        .prepare(
+          `UPDATE messages
+           SET transcript_entry_id = ?,
+               openclaw_sender_metadata = CASE
+                 WHEN role = 'user' THEN COALESCE(openclaw_sender_metadata, ?)
+                 ELSE openclaw_sender_metadata
+               END
+           WHERE message_id = ?`,
+        )
+        .run(transcriptEntryId, serializedSenderMetadata, messageId);
+      return result.changes > 0;
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("UNIQUE constraint failed")) {
+        return false;
+      }
+      throw error;
+    }
+  }
+
+  /** Return the subset of `entryIds` that already exist for the conversation. */
+  async filterExistingTranscriptEntryIds(
+    conversationId: ConversationId,
+    entryIds: readonly string[],
+  ): Promise<Set<string>> {
+    const existing = new Set<string>();
+    const chunkSize = 400;
+    for (let start = 0; start < entryIds.length; start += chunkSize) {
+      const chunk = entryIds.slice(start, start + chunkSize);
+      const placeholders = chunk.map(() => "?").join(", ");
+      const rows = this.db
+        .prepare(
+          `SELECT transcript_entry_id
+         FROM messages
+         WHERE conversation_id = ? AND transcript_entry_id IN (${placeholders})`,
+        )
+        .all(conversationId, ...chunk) as unknown as Array<{ transcript_entry_id: string }>;
+      for (const row of rows) {
+        existing.add(row.transcript_entry_id);
+      }
+    }
+    return existing;
+  }
+
+  async countMessagesByIdentity(
+    conversationId: ConversationId,
+    role: MessageRole,
+    content: string,
+  ): Promise<number> {
+    const identityHash = buildMessageIdentityHash(role, content);
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS count
+       FROM messages
+       WHERE conversation_id = ? AND identity_hash = ? AND role = ? AND content = ?`,
+      )
+      .get(conversationId, identityHash, role, content) as unknown as CountRow | undefined;
+
+    return row?.count ?? 0;
+  }
+
+  /**
+   * Persist explicit trust classification for one message transcript anchor.
+   *
+   * A non-null `messages.transcript_entry_id` is not trusted until this table
+   * marks it verified or repaired.
+   */
+  async upsertMessageTranscriptAnchorTrust(
+    input: UpsertMessageTranscriptAnchorTrustInput,
+  ): Promise<void> {
+    this.db
+      .prepare(
+        `INSERT INTO message_transcript_anchor_trust (
+           message_id, conversation_id, transcript_entry_id, trust_state,
+           source, reason, verified_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(message_id) DO UPDATE SET
+           conversation_id = excluded.conversation_id,
+           transcript_entry_id = excluded.transcript_entry_id,
+           trust_state = excluded.trust_state,
+           source = excluded.source,
+           reason = excluded.reason,
+           verified_at = excluded.verified_at,
+           updated_at = datetime('now')`,
+      )
+      .run(
+        input.messageId,
+        input.conversationId,
+        input.transcriptEntryId ?? null,
+        input.trustState,
+        input.source,
+        input.reason ?? null,
+        formatNullableTimestamp(input.verifiedAt),
+      );
+  }
+
+  /** True only for verified or repaired anchors in this conversation. */
+  async isTrustedTranscriptAnchor(
+    conversationId: ConversationId,
+    transcriptEntryId: string,
+  ): Promise<boolean> {
+    const normalizedTranscriptEntryId = transcriptEntryId.trim();
+    if (!normalizedTranscriptEntryId) {
+      return false;
+    }
+    const row = this.db
+      .prepare(
+        `SELECT 1 AS found
+         FROM message_transcript_anchor_trust
+         WHERE conversation_id = ?
+           AND transcript_entry_id = ?
+           AND trust_state IN ('verified', 'repaired')
+         LIMIT 1`,
+      )
+      .get(conversationId, normalizedTranscriptEntryId) as { found?: number } | undefined;
+    return row?.found === 1;
+  }
+
+  /**
+   * Whether the newest persisted row has the same identity hash and preserved
+   * reasoning content. Used to dedup adjacent delivery-mirror messages whose
+   * text content is already covered by the immediately preceding response entry.
+   */
+  async hasPreviousReasonedMessageByIdentity(
+    conversationId: ConversationId,
+    role: MessageRole,
+    content: string,
+  ): Promise<boolean> {
+    const identityHash = buildMessageIdentityHash(role, content);
+    const row = this.db
+      .prepare(
+        `SELECT 1 AS found
+       FROM (
+         SELECT message_id, identity_hash, role, content
+         FROM messages
+         WHERE conversation_id = ?
+         ORDER BY seq DESC
+         LIMIT 1
+       ) AS newest
+       WHERE newest.identity_hash = ?
+         AND newest.role = ?
+         AND newest.content = ?
+         AND EXISTS (
+           SELECT 1
+           FROM message_parts AS part
+           WHERE part.message_id = newest.message_id
+             AND (
+               part.part_type = 'reasoning'
+               OR (
+                 part.metadata IS NOT NULL
+                 AND json_valid(part.metadata)
+                 AND json_extract(part.metadata, '$.topLevelReasoningField') = 'reasoning_content'
+                 AND json_type(part.metadata, '$.topLevelReasoningContent') = 'text'
+                 AND length(json_extract(part.metadata, '$.topLevelReasoningContent')) > 0
+               )
+             )
+         )
+       LIMIT 1`,
+      )
+      .get(conversationId, identityHash, role, content) as unknown as { found?: number } | undefined;
+    return row?.found === 1;
+  }
+
+  async countMessagesByIdentityHash(
+    conversationId: ConversationId,
+    role: MessageRole,
+    identityHash: string,
+  ): Promise<number> {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS count
+       FROM messages
+       WHERE conversation_id = ? AND identity_hash = ? AND role = ?`,
+      )
+      .get(conversationId, identityHash, role) as unknown as CountRow | undefined;
+
+    return row?.count ?? 0;
+  }
+
+  async countMessagesByIdentityBeforeTimestamp(params: {
+    conversationId: ConversationId;
+    role: MessageRole;
+    content: string;
+    beforeCreatedAt: string;
+  }): Promise<number> {
+    return this.countMessagesByIdentityBeforeTimestampSync(params);
+  }
+
+  private countMessagesByIdentityBeforeTimestampSync(params: {
+    conversationId: ConversationId;
+    role: MessageRole;
+    content: string;
+    beforeCreatedAt: string;
+  }): number {
+    const identityHash = buildMessageIdentityHash(params.role, params.content);
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS count
+       FROM messages
+       WHERE conversation_id = ?
+         AND identity_hash = ?
+         AND role = ?
+         AND content = ?
+         AND created_at < ?`,
+      )
+      .get(
+        params.conversationId,
+        identityHash,
+        params.role,
+        params.content,
+        params.beforeCreatedAt,
+      ) as unknown as CountRow | undefined;
+
+    return row?.count ?? 0;
+  }
+
+  async getMessageById(messageId: MessageId): Promise<MessageRecord | null> {
+    const row = this.db
+      .prepare(
+        `SELECT message_id, conversation_id, seq, role, content, token_count, created_at, large_content, transcript_entry_id, openclaw_sender_metadata
+       FROM messages WHERE message_id = ?`,
+      )
+      .get(messageId) as unknown as MessageRow | undefined;
+    return row ? toMessageRecord(row) : null;
+  }
+
+  /** Return the most recent message whose `large_content` sidecar references the given file id. */
+  async getMessageByLargeContent(fileId: string): Promise<MessageRecord | null> {
+    const row = this.db
+      .prepare(
+        `SELECT message_id, conversation_id, seq, role, content, token_count, created_at, large_content, transcript_entry_id, openclaw_sender_metadata
+       FROM messages
+       WHERE large_content = ?
+       ORDER BY seq DESC
+       LIMIT 1`,
+      )
+      .get(fileId) as unknown as MessageRow | undefined;
+    return row ? toMessageRecord(row) : null;
+  }
+
+  async createMessageParts(messageId: MessageId, parts: CreateMessagePartInput[]): Promise<void> {
+    if (parts.length === 0) {
+      return;
+    }
+
+    const stmt = this.db.prepare(
+      `INSERT INTO message_parts (
+         part_id,
+         message_id,
+         session_id,
+         part_type,
+         ordinal,
+         text_content,
+         tool_call_id,
+         tool_name,
+         tool_input,
+         tool_output,
+         metadata
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+
+    for (const part of parts) {
+      stmt.run(
+        randomUUID(),
+        messageId,
+        part.sessionId,
+        part.partType,
+        part.ordinal,
+        part.textContent ?? null,
+        part.toolCallId ?? null,
+        part.toolName ?? null,
+        part.toolInput ?? null,
+        part.toolOutput ?? null,
+        part.metadata ?? null,
+      );
+    }
+  }
+
+  async getMessageParts(messageId: MessageId): Promise<MessagePartRecord[]> {
+    const rows = this.db
+      .prepare(
+        `SELECT
+         part_id,
+         message_id,
+         session_id,
+         part_type,
+         ordinal,
+         text_content,
+         tool_call_id,
+         tool_name,
+         tool_input,
+         tool_output,
+         metadata
+       FROM message_parts
+       WHERE message_id = ?
+       ORDER BY ordinal`,
+      )
+      .all(messageId) as unknown as MessagePartRow[];
+
+    return rows.map(toMessagePartRecord);
+  }
+
+  async getMessageCount(conversationId: ConversationId): Promise<number> {
+    const row = this.db
+      .prepare(`SELECT COUNT(*) AS count FROM messages WHERE conversation_id = ?`)
+      .get(conversationId) as unknown as CountRow;
+    return row?.count ?? 0;
+  }
+
+  async getMaxSeq(conversationId: ConversationId): Promise<number> {
+    const row = this.db
+      .prepare(
+        `SELECT COALESCE(MAX(seq), 0) AS max_seq
+       FROM messages WHERE conversation_id = ?`,
+      )
+      .get(conversationId) as unknown as MaxSeqRow;
+    return row?.max_seq ?? 0;
+  }
+
+  // ── Deletion ──────────────────────────────────────────────────────────────
+
+  /**
+   * Delete messages and their associated records (context_items, FTS, message_parts).
+   *
+   * Skips messages referenced by canonical or pending summaries to avoid
+   * breaking summary DAGs. Returns the count of actually deleted messages.
+   */
+  async deleteMessages(messageIds: MessageId[]): Promise<number> {
+    if (messageIds.length === 0) {
+      return 0;
+    }
+
+    let deleted = 0;
+    for (const messageId of messageIds) {
+      // Skip if referenced by a summary (ON DELETE RESTRICT would fail anyway)
+      const refRow = this.db
+        .prepare(
+          `SELECT 1 AS found
+           WHERE EXISTS (SELECT 1 FROM summary_messages WHERE message_id = ?)
+              OR EXISTS (SELECT 1 FROM pending_summary_node_messages WHERE message_id = ?)`,
+        )
+        .get(messageId, messageId) as unknown as { found: number } | undefined;
+      if (refRow) {
+        continue;
+      }
+
+      // Remove from context_items first (RESTRICT constraint)
+      this.db
+        .prepare(`DELETE FROM context_items WHERE item_type = 'message' AND message_id = ?`)
+        .run(messageId);
+
+      this.deleteMessageFromFullText(messageId);
+
+      // Delete the message (message_parts cascade via ON DELETE CASCADE)
+      this.db.prepare(`DELETE FROM messages WHERE message_id = ?`).run(messageId);
+
+      deleted += 1;
+    }
+
+    return deleted;
+  }
+
+  // ── Search ────────────────────────────────────────────────────────────────
+
+  /**
+   * Search messages. Delegates to the configured search executor (the
+   * off-main-thread search worker) when one is attached.
+   */
+  async searchMessages(input: MessageSearchInput): Promise<MessageSearchResult[]> {
+    return (await this.searchMessagesWithScanInfo(input)).results;
+  }
+
+  /** Search messages and report whether a bounded content scan stopped early. */
+  async searchMessagesWithScanInfo(
+    input: MessageSearchInput,
+  ): Promise<SearchOutcome<MessageSearchResult>> {
+    if (this.searchExecutor) {
+      return this.searchExecutor.searchMessages(input);
+    }
+    return this.searchMessagesInProcess(input);
+  }
+
+  /** Run a message search synchronously on this store's own connection. */
+  searchMessagesInProcess(input: MessageSearchInput): SearchOutcome<MessageSearchResult> {
+    const limit = input.limit ?? 50;
+
+    if (input.mode === "full_text") {
+      // FTS5 unicode61 can return incomplete matches for CJK text, so route
+      // those queries through the bounded LIKE scan immediately.
+      if (containsCjk(input.query)) {
+        return this.searchLike(input, limit);
+      }
+      if (this.fts5Available) {
+        try {
+          return { results: this.searchFullText(input, limit), scanLimited: false };
+        } catch {
+          return this.searchLike(input, limit);
+        }
+      }
+      return this.searchLike(input, limit);
+    }
+    return this.searchRegex(input, limit);
+  }
+
+  private indexMessageForFullText(messageId: MessageId, content: string): void {
+    if (!this.fts5Available) {
+      return;
+    }
+    const normalizedContent = normalizeMessageContentForFullTextIndex(content);
+    if (!normalizedContent) {
+      return;
+    }
+    try {
+      this.db
+        .prepare(`INSERT INTO messages_fts(rowid, content) VALUES (?, ?)`)
+        .run(messageId, normalizedContent);
+    } catch {
+      // Full-text indexing is optional. Message persistence must still succeed.
+    }
+  }
+
+  private currentSqliteTimestamp(): string {
+    const row = this.db
+      .prepare(`SELECT datetime('now') AS created_at`)
+      .get() as unknown as TimestampRow;
+    return row.created_at;
+  }
+
+  private prepareMessageInsert(
+    input: CreateMessageInput,
+    createdAt = this.currentSqliteTimestamp(),
+  ): PreparedMessageInsert {
+    return {
+      ...input,
+      createdAt: formatMessageCreatedAt(input.createdAt) ?? createdAt,
+      identityHash: input.identityHash ?? buildMessageIdentityHash(input.role, input.content),
+      openClawSenderMetadata: input.role === "user" ? input.openClawSenderMetadata : null,
+      stableEventKey: input.stableEventKey ?? null,
+    };
+  }
+
+  /**
+   * Count already-persisted replay rows for one exact message identity at a
+   * timestamp. The guard's threshold is per identical message tuple, not per
+   * role-wide same-second burst.
+   */
+  private countExistingReplayRowsAtTimestampForIdentity(
+    conversationId: ConversationId,
+    role: MessageRole,
+    identityHash: string,
+    content: string,
+    createdAt: string,
+  ): number {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS count
+       FROM messages AS m
+       WHERE m.conversation_id = ?
+         AND m.role = ?
+         AND m.identity_hash = ?
+         AND m.content = ?
+         AND m.created_at = ?
+         AND length(m.content) > 0
+         AND EXISTS (
+           SELECT 1
+           FROM messages AS prior
+           WHERE prior.conversation_id = m.conversation_id
+             AND prior.identity_hash = m.identity_hash
+             AND prior.role = m.role
+             AND prior.content = m.content
+             AND prior.created_at < m.created_at
+         )`,
+      )
+      .get(conversationId, role, identityHash, content, createdAt) as unknown as
+        | CountRow
+        | undefined;
+    return row?.count ?? 0;
+  }
+
+  /**
+   * Count already-persisted replay rows across one role and timestamp. This is
+   * used only for external user input so distinct rebroadcasted user messages
+   * share the same replay budget.
+   */
+  private countExistingReplayRowsAtTimestampForRole(
+    conversationId: ConversationId,
+    role: "user",
+    createdAt: string,
+  ): number {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS count
+       FROM messages AS m
+       WHERE m.conversation_id = ?
+         AND m.role = ?
+         AND m.created_at = ?
+         AND length(m.content) > 0
+         AND EXISTS (
+           SELECT 1
+           FROM messages AS prior
+           WHERE prior.conversation_id = m.conversation_id
+             AND prior.identity_hash = m.identity_hash
+             AND prior.role = m.role
+             AND prior.content = m.content
+             AND prior.created_at < m.created_at
+         )`,
+      )
+      .get(conversationId, role, createdAt) as unknown as CountRow | undefined;
+    return row?.count ?? 0;
+  }
+
+  /**
+   * Anti-replay guard against floods of identical messages at the same SQLite
+   * `created_at` second. SQLite's `datetime('now')` has second-level
+   * granularity, so legitimate fast bursts can collide with malicious replays
+   * on the raw (conversation, content, created_at) tuple.
+   *
+   * Role-aware policy (#639 fix):
+   *   - role=user        → EXTERNAL input, threshold `replayFloodThresholdExternal`
+   *                        (default 3). Preserves classic defense against
+   *                        webhook/input rebroadcast attacks.
+   *   - role=tool|assistant|system → INTERNAL runtime output, threshold
+   *                        `replayFloodThresholdInternal` (default 32).
+   *                        Tool results and assistant deltas can legitimately
+   *                        repeat (idempotent retries, status pings, etc.) and
+   *                        are not vulnerable to third-party rebroadcast.
+   *
+   * External user input keeps an aggregate role/timestamp budget to preserve
+   * replay defense. Internal runtime output uses exact message identity so
+   * distinct same-second tool results do not consume each other's budget.
+   */
+  private assertNoReplayTimestampFlood(inputs: PreparedMessageInsert[]): void {
+    if (inputs.length === 0) {
+      return;
+    }
+
+    const replicatedByGroup = new Map<string, ReplayFloodGroup>();
+    for (const input of inputs) {
+      if (input.content.length === 0) {
+        continue;
+      }
+      const priorCount = this.countMessagesByIdentityBeforeTimestampSync({
+        conversationId: input.conversationId,
+        role: input.role,
+        content: input.content,
+        beforeCreatedAt: input.createdAt,
+      });
+      if (priorCount === 0) {
+        continue;
+      }
+      const key = input.role === "user"
+        ? JSON.stringify([input.conversationId, input.role, input.createdAt])
+        : JSON.stringify([
+            input.conversationId,
+            input.role,
+            input.identityHash,
+            input.content,
+            input.createdAt,
+          ]);
+      const group = replicatedByGroup.get(key);
+      if (group) {
+        group.candidateCount += 1;
+      } else if (input.role === "user") {
+        replicatedByGroup.set(key, {
+          scope: "external",
+          conversationId: input.conversationId,
+          role: input.role,
+          createdAt: input.createdAt,
+          candidateCount: 1,
+        });
+      } else {
+        replicatedByGroup.set(key, {
+          scope: "internal",
+          conversationId: input.conversationId,
+          role: input.role,
+          content: input.content,
+          identityHash: input.identityHash,
+          createdAt: input.createdAt,
+          candidateCount: 1,
+        });
+      }
+    }
+
+    for (const group of replicatedByGroup.values()) {
+      const existingCount = group.scope === "external"
+        ? this.countExistingReplayRowsAtTimestampForRole(
+            group.conversationId,
+            group.role,
+            group.createdAt,
+          )
+        : this.countExistingReplayRowsAtTimestampForIdentity(
+            group.conversationId,
+            group.role,
+            group.identityHash,
+            group.content,
+            group.createdAt,
+          );
+      const replicatedCount = existingCount + group.candidateCount;
+      const threshold = this.replayFloodThresholdForRole(group.role);
+      if (replicatedCount >= threshold) {
+        throw new Error(
+          `[lcm] refused replay-like message batch: conversation=${group.conversationId} role=${group.role} createdAt=${group.createdAt} replicatedRows=${replicatedCount} threshold=${threshold}`,
+        );
+      }
+    }
+  }
+
+  private replayFloodThresholdForRole(role: string): number {
+    // External-input role: user messages are the rebroadcast surface.
+    if (role === "user") return this.replayFloodThresholdExternal;
+    // Internal-runtime roles: tool, assistant, system.
+    return this.replayFloodThresholdInternal;
+  }
+
+  private deleteMessageFromFullText(messageId: MessageId): void {
+    if (!this.fts5Available) {
+      return;
+    }
+    try {
+      this.db.prepare(`DELETE FROM messages_fts WHERE rowid = ?`).run(messageId);
+    } catch {
+      // Ignore FTS cleanup failures; the source row deletion is authoritative.
+    }
+  }
+
+  /**
+   * FTS5 search in two phases so per-row work only touches the returned page:
+   *
+   * 1. Rank FTS hits against the (conversation_id, created_at) and
+   *    (created_at) indexes. `created_at` is stored after `content` in the
+   *    messages row, so reading it from the table walks each large row's
+   *    overflow chain; the covering indexes avoid that, and recency order
+   *    stops after `limit` hits.
+   * 2. Load role, conversation and snippet for at most `limit` messages.
+   */
+  private searchFullText(input: MessageSearchInput, limit: number): MessageSearchResult[] {
+    const ftsQuery = sanitizeFts5Query(input.query);
+    const where: string[] = [];
+    const args: Array<string | number> = [ftsQuery];
+    appendConversationScopeConstraint({
+      where,
+      args,
+      columnExpr: "m.conversation_id",
+      conversationId: input.conversationId,
+      conversationIds: input.conversationIds,
+    });
+    appendMessageTimeConstraints(where, args, "m.created_at", input.since, input.before);
+    args.push(limit);
+    const orderBy = buildFtsOrderBy(input.sort, "m.created_at");
+
+    const ranked = this.db
+      .prepare(
+        `WITH hits AS MATERIALIZED (
+           SELECT rowid AS message_id, rank
+           FROM messages_fts
+           WHERE messages_fts MATCH ?
+         )
+         SELECT m.message_id, m.created_at, hits.rank AS rank
+         FROM messages AS m
+         CROSS JOIN hits ON hits.message_id = m.message_id
+         ${where.length > 0 ? `WHERE ${where.join(" AND ")}` : ""}
+         ORDER BY ${orderBy}
+         LIMIT ?`,
+      )
+      .all(...args) as unknown as Array<{ message_id: number; created_at: string; rank: number }>;
+    if (ranked.length === 0) {
+      return [];
+    }
+
+    const ids = ranked.map((row) => row.message_id);
+    const placeholders = ids.map(() => "?").join(", ");
+    const details = new Map(
+      (
+        this.db
+          .prepare(
+            `SELECT message_id, conversation_id, role
+             FROM messages
+             WHERE message_id IN (${placeholders})`,
+          )
+          .all(...ids) as unknown as Array<{
+          message_id: number;
+          conversation_id: number;
+          role: MessageRole;
+        }>
+      ).map((row) => [row.message_id, row]),
+    );
+    const snippets = new Map(
+      (
+        this.db
+          .prepare(
+            `SELECT rowid AS message_id, snippet(messages_fts, 0, '', '', '...', 32) AS snippet
+             FROM messages_fts
+             WHERE messages_fts MATCH ? AND rowid IN (${placeholders})`,
+          )
+          .all(ftsQuery, ...ids) as unknown as Array<{ message_id: number; snippet: string }>
+      ).map((row) => [row.message_id, row.snippet]),
+    );
+
+    const results: MessageSearchResult[] = [];
+    for (const row of ranked) {
+      const detail = details.get(row.message_id);
+      if (!detail) {
+        continue;
+      }
+      results.push({
+        messageId: row.message_id,
+        conversationId: detail.conversation_id,
+        role: detail.role,
+        snippet: snippets.get(row.message_id) ?? "",
+        createdAt: parseUtcTimestamp(row.created_at),
+        rank: row.rank,
+      });
+    }
+    return results;
+  }
+
+  /**
+   * Substring fallback for CJK queries, missing FTS5, or FTS syntax errors.
+   * LIKE cannot use an index, so it runs as a bounded newest-first scan.
+   */
+  private searchLike(input: MessageSearchInput, limit: number): SearchOutcome<MessageSearchResult> {
+    const plan = buildLikeSearchPlan("content", input.query);
+    if (plan.terms.length === 0) {
+      return { results: [], scanLimited: false };
+    }
+
+    const results: MessageSearchResult[] = [];
+    const scanLimited = this.scanMessagesNewestFirst(
+      input,
+      this.searchScanLimits.likeMaxRows,
+      (ids) => {
+        const rows = this.db
+          .prepare(
+            `SELECT message_id, conversation_id, role, content, created_at
+             FROM messages
+             WHERE message_id IN (${ids.map(() => "?").join(", ")})
+               AND ${plan.where.join(" AND ")}`,
+          )
+          .all(...ids, ...plan.args) as unknown as MessageScanRow[];
+        for (const row of orderRowsByIds(rows, ids)) {
+          const normalizedContent =
+            normalizeMessageContentForFullTextIndex(row.content) ?? row.content;
+          const haystack = normalizedContent.toLowerCase();
+          if (!plan.terms.every((term) => haystack.includes(term))) {
+            continue;
+          }
+          results.push({
+            messageId: row.message_id,
+            conversationId: row.conversation_id,
+            role: row.role,
+            snippet: createFallbackSnippet(normalizedContent, plan.terms),
+            createdAt: parseUtcTimestamp(row.created_at),
+            rank: 0,
+          });
+          if (results.length >= limit) {
+            return true;
+          }
+        }
+        return false;
+      },
+    );
+    return { results, scanLimited };
+  }
+
+  /**
+   * SQLite has no native regex, so candidates are matched in JS during a
+   * bounded newest-first scan that holds at most one chunk in memory.
+   */
+  private searchRegex(input: MessageSearchInput, limit: number): SearchOutcome<MessageSearchResult> {
+    const re = compileSafeSearchRegex(input.query);
+    if (!re) {
+      return { results: [], scanLimited: false };
+    }
+
+    const results: MessageSearchResult[] = [];
+    const scanLimited = this.scanMessagesNewestFirst(
+      input,
+      this.searchScanLimits.regexMaxRows,
+      (ids) => {
+        const rows = this.db
+          .prepare(
+            `SELECT message_id, conversation_id, role, content, created_at
+             FROM messages
+             WHERE message_id IN (${ids.map(() => "?").join(", ")})`,
+          )
+          .all(...ids) as unknown as MessageScanRow[];
+        for (const row of orderRowsByIds(rows, ids)) {
+          const match = re.exec(row.content);
+          if (!match) {
+            continue;
+          }
+          results.push({
+            messageId: row.message_id,
+            conversationId: row.conversation_id,
+            role: row.role,
+            snippet: match[0],
+            createdAt: parseUtcTimestamp(row.created_at),
+            rank: 0,
+          });
+          if (results.length >= limit) {
+            return true;
+          }
+        }
+        return false;
+      },
+    );
+    return { results, scanLimited };
+  }
+
+  /**
+   * Walk in-scope message ids newest-first in keyset chunks over the
+   * created_at indexes, handing each chunk to `visit` until it reports it is
+   * satisfied. Returns true when the row or time budget stopped the walk while
+   * older in-scope rows remained unexamined.
+   */
+  private scanMessagesNewestFirst(
+    input: MessageSearchInput,
+    maxRows: number,
+    visit: (ids: number[]) => boolean,
+  ): boolean {
+    const baseWhere: string[] = [];
+    const baseArgs: Array<string | number> = [];
+    appendConversationScopeConstraint({
+      where: baseWhere,
+      args: baseArgs,
+      columnExpr: "conversation_id",
+      conversationId: input.conversationId,
+      conversationIds: input.conversationIds,
+    });
+    appendMessageTimeConstraints(baseWhere, baseArgs, "created_at", input.since, input.before);
+
+    const { chunkRows, maxScanMs } = this.searchScanLimits;
+    const startedAt = Date.now();
+    let cursor: { createdAt: string; messageId: number } | null = null;
+    let scanned = 0;
+    for (;;) {
+      const budgetSpent = scanned >= maxRows || Date.now() - startedAt >= maxScanMs;
+      const where = [...baseWhere];
+      const args = [...baseArgs];
+      if (cursor) {
+        where.push("(created_at, message_id) < (?, ?)");
+        args.push(cursor.createdAt, cursor.messageId);
+      }
+      const take = budgetSpent ? 1 : Math.min(chunkRows, maxRows - scanned);
+      args.push(take);
+      const rows = this.db
+        .prepare(
+          `SELECT message_id, created_at
+           FROM messages
+           ${where.length > 0 ? `WHERE ${where.join(" AND ")}` : ""}
+           ORDER BY created_at DESC, message_id DESC
+           LIMIT ?`,
+        )
+        .all(...args) as unknown as Array<{ message_id: number; created_at: string }>;
+      if (budgetSpent) {
+        return rows.length > 0;
+      }
+      if (rows.length === 0) {
+        return false;
+      }
+      scanned += rows.length;
+      const last = rows[rows.length - 1]!;
+      cursor = { createdAt: last.created_at, messageId: last.message_id };
+      if (visit(rows.map((row) => row.message_id))) {
+        return false;
+      }
+      if (rows.length < take) {
+        return false;
+      }
+    }
+  }
+}

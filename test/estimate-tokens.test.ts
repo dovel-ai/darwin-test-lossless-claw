@@ -1,0 +1,436 @@
+import { describe, it, expect } from "vitest";
+import {
+  estimateSerializedMessageTokens,
+  estimateSerializedMessagesTokens,
+  estimateTokens,
+} from "../src/estimate-tokens.js";
+import { toStoredMessage } from "../src/message-content.js";
+import type { AgentMessage } from "../src/openclaw-bridge.js";
+
+describe("estimateTokens", () => {
+  it("estimates ASCII text at ~0.25 tokens/char", () => {
+    expect(estimateTokens("Hello world")).toBe(3); // 11 chars × 0.25 = 2.75 → 3
+  });
+
+  it("estimates CJK Han at ~1.5 tokens/char", () => {
+    expect(estimateTokens("你好世界")).toBe(6); // 4 chars × 1.5 = 6
+  });
+
+  it("estimates Hiragana at ~1.5 tokens/char", () => {
+    expect(estimateTokens("こんにちは")).toBe(8); // 5 chars × 1.5 = 7.5 → 8
+  });
+
+  it("estimates Katakana at ~1.5 tokens/char", () => {
+    expect(estimateTokens("カタカナ")).toBe(6); // 4 chars × 1.5 = 6
+  });
+
+  it("estimates Hangul at ~1.5 tokens/char", () => {
+    expect(estimateTokens("안녕하세요")).toBe(8); // 5 chars × 1.5 = 7.5 → 8
+  });
+
+  it("estimates emoji at ~2 tokens/char", () => {
+    expect(estimateTokens("🔥🎉💯")).toBe(6); // 3 emoji × 2 = 6
+  });
+
+  it("handles mixed CJK + ASCII + emoji", () => {
+    const result = estimateTokens("Hello 你好 🔥");
+    // 5 ASCII (1.25) + space (0.25) + 2 Han (3) + space (0.25) + emoji (2) = 6.75 → 7
+    expect(result).toBe(7);
+  });
+
+  it("returns 0 for empty string", () => {
+    expect(estimateTokens("")).toBe(0);
+  });
+
+  it("estimates CJK Extension B characters", () => {
+    // 𠮷 (U+20BB7, CJK Extension B)
+    expect(estimateTokens("𠮷")).toBe(2); // supplementary plane CJK → 1.5 → 2
+  });
+
+  it("estimates fullwidth forms at ~1.5 tokens/char", () => {
+    expect(estimateTokens("ＡＢＣ")).toBe(5); // 3 fullwidth × 1.5 = 4.5 → 5
+  });
+
+  it("estimates CJK punctuation at ~1.5 tokens/char", () => {
+    expect(estimateTokens("、。！")).toBe(5); // 3 chars × 1.5 = 4.5 → 5
+  });
+});
+
+describe("estimateSerializedMessageTokens", () => {
+  it("counts structured tool payloads that text-only estimates miss", () => {
+    // Codex-era mirrored tool result: payload duplicated across `content`
+    // and `text` plus identifier spam. A text-only estimate sees only the
+    // `text` field; the serialized estimate must see the whole structure.
+    const payload = "x".repeat(12_000);
+    const message = {
+      role: "toolResult",
+      toolCallId: "call_0123456789",
+      toolName: "exec",
+      content: [
+        {
+          type: "toolResult",
+          id: "call_0123456789",
+          toolCallId: "call_0123456789",
+          toolUseId: "call_0123456789",
+          tool_use_id: "call_0123456789",
+          content: payload,
+          text: payload,
+        },
+      ],
+      timestamp: 1781035270000,
+    };
+    const serialized = estimateSerializedMessageTokens(message);
+    const textOnly = estimateTokens(payload);
+    // Both payload copies plus envelope must count: at least ~2x text-only.
+    expect(serialized).toBeGreaterThan(textOnly * 1.9);
+  });
+
+  it("counts assistant tool-call arguments with no text blocks", () => {
+    const message = {
+      role: "assistant",
+      content: [
+        {
+          type: "toolCall",
+          id: "call_1",
+          name: "write_file",
+          arguments: { path: "/tmp/file", body: "y".repeat(8_000) },
+        },
+      ],
+    };
+    expect(estimateSerializedMessageTokens(message)).toBeGreaterThan(2_000);
+  });
+
+  it("ignores top-level private OpenClaw metadata", () => {
+    const visibleMessage = { role: "user", content: "hello" };
+    const messageWithPrivateMetadata = {
+      ...visibleMessage,
+      __openclaw: {
+        upstreamUserText: "x".repeat(400_000),
+      },
+    };
+
+    expect(estimateSerializedMessageTokens(messageWithPrivateMetadata)).toBe(
+      estimateSerializedMessageTokens(visibleMessage),
+    );
+  });
+
+  it.each([
+    { name: "string replacement", content: "old input ".repeat(500), text: "recorded input", rendered: "recorded input" },
+    { name: "empty projection", content: "old input ".repeat(500), text: "", rendered: "" },
+    { name: "literal data URL", content: "short", text: `data:text/plain,${"x".repeat(9000)}`, rendered: `data:text/plain,${"x".repeat(9000)}` },
+    {
+      name: "first text block only",
+      content: [{ type: "text", text: "original", marker: "kept" }, { type: "text", text: "later text" }],
+      text: "recorded input",
+      rendered: [{ type: "text", text: "recorded input", marker: "kept" }, { type: "text", text: "later text" }],
+    },
+    {
+      name: "media-only content",
+      content: [{ type: "image", data: "AA==", mimeType: "image/png" }],
+      text: "recorded input",
+      rendered: [{ type: "text", text: "recorded input" }, { type: "image", data: "AA==", mimeType: "image/png" }],
+    },
+  ])("counts rendered model-prompt content once: $name", ({ content, text, rendered }) => {
+    const message = {
+      role: "user", content,
+      __openclaw: { modelPromptProjection: { version: 1, text }, upstreamUserText: "private".repeat(1000) },
+    };
+    const original = structuredClone(message);
+    expect(estimateSerializedMessageTokens(message)).toBe(estimateTokens(JSON.stringify({ role: "user", content: rendered })));
+    expect(message).toEqual(original);
+  });
+
+  it("counts large recorded projections while retaining native media estimates", () => {
+    const text = "recorded input ".repeat(2000);
+    const image = { type: "image", data: "A1b2".repeat(8192), mimeType: "image/png" };
+    const message = {
+      role: "user", content: [image, { type: "text", text: "short" }, { type: "text", text: "later" }],
+      __openclaw: { modelPromptProjection: { version: 1, text } },
+    };
+    const rendered = { role: "user", content: [image, { type: "text", text }, { type: "text", text: "later" }] };
+    const estimated = estimateSerializedMessageTokens(message);
+    expect(estimated).toBe(estimateSerializedMessageTokens(rendered));
+    expect(estimated).toBeGreaterThan(estimateTokens(text) + 1500);
+    expect(estimated).toBeLessThan(estimateTokens(text) + 2000);
+  });
+
+  it.each([
+    { role: "user", projection: { version: 2, text: "ignored".repeat(1000) } },
+    { role: "user", projection: { version: 1, text: 123 } },
+    { role: "assistant", projection: { version: 1, text: "ignored".repeat(1000) } },
+  ])("keeps visible content for non-rendered projection metadata: %j", ({ role, projection }) => {
+    const visible = { role, content: "visible input" };
+    expect(estimateSerializedMessageTokens({ ...visible, __openclaw: { modelPromptProjection: projection } }))
+      .toBe(estimateSerializedMessageTokens(visible));
+  });
+
+  it("still counts private-looking keys inside rendered tool payloads", () => {
+    const baseline = {
+      role: "assistant",
+      content: [{ type: "toolCall", name: "example", arguments: {} }],
+    };
+    const renderedPayload = {
+      role: "assistant",
+      content: [
+        {
+          type: "toolCall",
+          name: "example",
+          arguments: { __openclaw: "y".repeat(8_000) },
+        },
+      ],
+    };
+
+    expect(estimateSerializedMessageTokens(renderedPayload)).toBeGreaterThan(
+      estimateSerializedMessageTokens(baseline) + 1_500,
+    );
+  });
+
+  it("substitutes a fixed cost for embedded base64 payloads", () => {
+    const base64 = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=".repeat(2_000); // ~74k chars
+    const message = {
+      role: "user",
+      content: [{ type: "image", data: base64 }],
+    };
+    const estimate = estimateSerializedMessageTokens(message);
+    // Full-length counting would be ~18.5k tokens; the fixed substitution
+    // keeps it near the per-part cost plus envelope.
+    expect(estimate).toBeLessThan(2_500);
+    expect(estimate).toBeGreaterThan(1_500);
+  });
+
+  it("substitutes a fixed cost for data: URLs", () => {
+    const dataUrl = `data:image/png;base64,${"A".repeat(50_000)}`;
+    const message = { role: "user", content: [{ type: "image", image: dataUrl }] };
+    expect(estimateSerializedMessageTokens(message)).toBeLessThan(2_500);
+  });
+
+  it.each([{ role: "tool" }, { role: "toolResult" }, { type: "toolResult" }])(
+    "does not count native image bytes as tool-result text (%j)",
+    (envelope) => {
+      const estimateImage = (data: string) => estimateSerializedMessageTokens({
+        ...envelope,
+        content: [{ type: "image", mimeType: "image/png", data }],
+      });
+      const small = estimateImage("A1b2".repeat(2_048));
+      const large = estimateImage("A1b2".repeat(262_144));
+
+      expect(large).toBe(small);
+      expect(large).toBeGreaterThan(1_500);
+      expect(large).toBeLessThan(2_500);
+    },
+  );
+
+  it("substitutes opaque data in nested structured tool-result content", () => {
+    const estimateImage = (data: string) => estimateSerializedMessageTokens({
+      role: "toolResult",
+      content: {
+        content: [{ type: "image_url", image_url: { url: `data:image/png;base64,${data}` } }],
+      },
+    });
+
+    const small = estimateImage("A".repeat(8_192));
+    const large = estimateImage("A".repeat(1_048_576));
+    expect(large).toBe(small);
+    expect(large).toBeGreaterThan(1_500);
+    expect(large).toBeLessThan(2_500);
+  });
+
+  it("counts every image and retains text pressure in mixed tool results", () => {
+    const image = { type: "image", data: "A1b2".repeat(262_144) };
+    const estimateContent = (content: unknown[]) => estimateSerializedMessageTokens({
+      role: "toolResult",
+      content,
+    });
+    const oneImage = estimateContent([image]);
+    const twoImages = estimateContent([image, image]);
+    const mixed = estimateContent([image, { type: "text", text: "x".repeat(20_000) }]);
+
+    expect(twoImages).toBeGreaterThan(oneImage + 1_500);
+    expect(twoImages).toBeLessThan(5_000);
+    expect(mixed).toBeGreaterThan(oneImage + 11_000);
+    expect(mixed).toBeLessThan(oneImage + 13_000);
+  });
+
+  it("still counts base64 in nested tool-result text fields in full", () => {
+    const text = "A1b2".repeat(20_000);
+    const estimate = estimateSerializedMessageTokens({
+      role: "toolResult",
+      content: { content: [{ type: "text", text }] },
+    });
+
+    expect(estimate).toBeGreaterThan(40_000);
+  });
+
+  it.each(["native", "nested"])("counts literal data URLs in %s tool-result text", (shape) => {
+    const textBlock = { type: "text", text: `data:text/plain,${"x".repeat(80_000)}` };
+    const estimate = estimateSerializedMessageTokens({
+      role: "toolResult",
+      content: shape === "native" ? [textBlock] : { content: [textBlock] },
+    });
+
+    expect(estimate).toBeGreaterThan(40_000);
+  });
+
+  it("counts base64 embedded in text fields in full (not substituted)", () => {
+    // Base64/hex inside tool-result TEXT is tokenized per character at the
+    // model boundary; only image/document source fields get the fixed cost.
+    const base64Text = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo0".repeat(2_200); // ~80k chars
+    const message = {
+      role: "toolResult",
+      content: [{ type: "text", text: base64Text }],
+    };
+    expect(estimateSerializedMessageTokens(message)).toBeGreaterThan(15_000);
+  });
+
+  it("uses provider-boundary pressure for large plain-text tool results", () => {
+    const payload = "x".repeat(20_000);
+    const message = {
+      role: "toolResult",
+      toolName: "exec",
+      content: payload,
+    };
+    expect(estimateSerializedMessageTokens(message)).toBeGreaterThan(11_000);
+  });
+
+  it("counts repeated shared block references in full", () => {
+    const block = { type: "text", text: "shared block ".repeat(100) };
+    const shared = { role: "user", content: [block, block] };
+    const distinct = {
+      role: "user",
+      content: [
+        { type: "text", text: "shared block ".repeat(100) },
+        { type: "text", text: "shared block ".repeat(100) },
+      ],
+    };
+    const sharedEstimate = estimateSerializedMessageTokens(shared);
+    const distinctEstimate = estimateSerializedMessageTokens(distinct);
+    expect(Math.abs(sharedEstimate - distinctEstimate)).toBeLessThan(5);
+  });
+
+  it("does not substitute ordinary long prose", () => {
+    const prose = ("The quick brown fox jumps over the lazy dog. ").repeat(200); // ~9k chars
+    const message = { role: "user", content: prose };
+    const estimate = estimateSerializedMessageTokens(message);
+    expect(estimate).toBeGreaterThan(2_000); // counted in full, not substituted
+  });
+
+  it("survives circular references without throwing", () => {
+    const message: Record<string, unknown> = { role: "user", content: "hello" };
+    message.self = message;
+    expect(() => estimateSerializedMessageTokens(message)).not.toThrow();
+    expect(estimateSerializedMessageTokens(message)).toBeGreaterThan(0);
+  });
+
+  it("excludes opaque replay signatures and host-only envelope fields", () => {
+    const encryptedReasoning = JSON.stringify({
+      id: "rs_0af2562073b39278016afb3c4940a887d1846d07373dd04a74",
+      type: "reasoning",
+      summary: [],
+      content: [],
+      encrypted_content: "gAAAAABq-zxU2h_svkPRj_JX2rbGHRUwKtvlGRLuERZ8o6".repeat(200),
+    });
+    const visibleAssistant = {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "" },
+        { type: "text", text: "Checked the logs." },
+        { type: "toolCall", id: "call_1", name: "exec", arguments: { command: "rg degraded" } },
+      ],
+    };
+    const recordedAssistant = {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "", thinkingSignature: encryptedReasoning },
+        { type: "text", text: "Checked the logs.", textSignature: '{"v":1,"id":"msg_0d29","phase":"commentary"}' },
+        { type: "toolCall", id: "call_1", name: "exec", arguments: { command: "rg degraded" }, thoughtSignature: "c2lnbmF0dXJl".repeat(50) },
+      ],
+      api: "openai-responses",
+      provider: "clawrouter",
+      model: "openai/gpt-6-astra",
+      responseId: "resp_0d29202084a77e91016afb56097a0487d1ad74850c64ad0395",
+      responseModel: "gpt-6-astra",
+      usage: { input: 3, output: 74, cacheRead: 84697, cacheWrite: 7124, totalTokens: 91898 },
+      diagnostics: [{ type: "openai_responses_terminal", details: { eventType: "response.completed" } }],
+      stopReason: "toolUse",
+      timestamp: 1794856457226,
+    };
+    const visibleToolResult = {
+      role: "toolResult",
+      toolCallId: "call_1",
+      toolName: "exec",
+      content: [{ type: "text", text: "degraded live fallback" }],
+      isError: false,
+    };
+    const recordedToolResult = {
+      ...visibleToolResult,
+      details: { aggregated: "degraded live fallback\n".repeat(2_000), exitCode: 0 },
+      timestamp: 1794855492943,
+    };
+
+    expect(estimateSerializedMessageTokens(recordedAssistant)).toBe(
+      estimateSerializedMessageTokens(visibleAssistant),
+    );
+    expect(estimateSerializedMessageTokens(recordedToolResult)).toBe(
+      estimateSerializedMessageTokens(visibleToolResult),
+    );
+  });
+
+  it("keeps measured completion occupancy as a floor for opaque reasoning", () => {
+    const message = {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "", thinkingSignature: "encrypted".repeat(4_000) },
+        { type: "text", text: "done" },
+      ],
+      usage: {
+        input: 3,
+        output: 20_000,
+        contextUsage: { state: "available", promptTokens: 90_000, totalTokens: 110_000 },
+      },
+    };
+    expect(estimateSerializedMessageTokens(message)).toBe(20_000);
+    const unmeasured = { ...message, usage: { input: 3, output: 20_000 } };
+    expect(estimateSerializedMessageTokens(unmeasured)).toBeLessThan(100);
+  });
+
+  it("keeps the signature payload of redacted thinking", () => {
+    const payload = "opaque redacted thinking payload ".repeat(400);
+    const redacted = {
+      role: "assistant",
+      content: [{ type: "thinking", thinking: "", thinkingSignature: payload, redacted: true }],
+    };
+    expect(estimateSerializedMessageTokens(redacted)).toBeGreaterThan(estimateTokens(payload));
+  });
+
+  it("sums across message lists", () => {
+    const message = { role: "user", content: "hello world" };
+    const single = estimateSerializedMessageTokens(message);
+    expect(estimateSerializedMessagesTokens([message, message])).toBe(single * 2);
+  });
+});
+
+describe("stored token counts", () => {
+  it("do not count opaque reasoning signatures", () => {
+    const base = {
+      role: "assistant",
+      api: "openai-responses",
+      provider: "clawrouter",
+      model: "openai/gpt-6-astra",
+      timestamp: 1794856457226,
+    };
+    const signature = JSON.stringify({
+      id: "rs_1",
+      type: "reasoning",
+      summary: [],
+      content: [],
+      encrypted_content: "gAAAAABq-zxU2h_svkPRj_JX2rbGHRUwKtvlGRLuERZ8o6".repeat(200),
+    });
+    const toolCall = { type: "toolCall", id: "call_1", name: "exec", arguments: { command: "rg degraded" } };
+    const signed = toStoredMessage({
+      ...base,
+      content: [{ type: "thinking", thinking: "", thinkingSignature: signature }, toolCall],
+    } as unknown as AgentMessage);
+    // The ~9k-character signature would cost ~2.3k tokens if counted.
+    expect(signed.tokenCount).toBeLessThan(200);
+  });
+});

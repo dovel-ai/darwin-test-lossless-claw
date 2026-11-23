@@ -1,0 +1,1734 @@
+# @martian-engineering/lossless-claw
+
+## 1.2.0
+
+<!-- release-rollback-version: 1.1.1 -->
+
+### Minor Changes
+
+- [#1238](https://github.com/Martian-Engineering/lossless-claw/pull/1238) [`99dfe43`](https://github.com/Martian-Engineering/lossless-claw/commit/99dfe435203e304a66fc582148cf0e2ed9a1bf55) Thanks [@jalehman](https://github.com/jalehman)! - Ingest the OpenClaw transcript through a persisted per-conversation visible-delta cursor instead of re-reading and reconciling the whole transcript on every `bootstrap` and `afterTurn`. Steady-state turns now read only new transcript entries (about 2–5 ms with no main-thread SQLite work, down from 0.3–28.5 s on large sessions).
+
+  - `commitTurn`, `afterTurn`, `ingest` and `ingestBatch` no longer persist runtime message arrays for transcript-backed sessions, so every new row carries its transcript entry id. `commitTurn` records its idempotency receipt in the same transaction as the drained rows.
+  - When OpenClaw invalidates a cursor, lossless-claw resyncs in bulk and restamps re-issued entries onto their existing rows instead of importing duplicates.
+  - Existing conversations migrate to cursor mode once, on first use, with the same bulk resync. Migration never deletes rows or clears transcript entry ids, and never imports history before the last stored entry that is still visible.
+  - A conversation created by `/reset` no longer imports pre-reset history ([#1199](https://github.com/Martian-Engineering/lossless-claw/issues/1199)).
+  - A host without OpenClaw's visible-delta reader now gets a logged capability error instead of the full-transcript reconcile. Every supported OpenClaw release ships the reader. The legacy reconcile code is now unreachable and will be removed in a follow-up release.
+
+- [#1242](https://github.com/Martian-Engineering/lossless-claw/pull/1242) [`924571a`](https://github.com/Martian-Engineering/lossless-claw/commit/924571aa8186f6f452cd739940e4f18d6ef14761) Thanks [@jalehman](https://github.com/jalehman)! - Record transcript history gaps. When a conversation enters cursor mode or resyncs, each run of storable transcript entries that Lossless Claw never stored and that sits before the anchor is saved as a marker in the new `conversation_transcript_gaps` table, and one warning reports the counts. `/lcm status`, `/lcm doctor`, `lcm status`, and `lcm conversations show` report the gaps. Markers are diagnostics only; nothing is imported or deleted.
+
+  Log quality: each incremental transcript drain logs one debug line with imported/restamped counts and duration; `assemble` logs when it reads the full visible transcript to fill missing replay keys; a session with no host transcript logs "transcript missing" once per conversation per process instead of on every turn.
+
+### Patch Changes
+
+- [#1239](https://github.com/Martian-Engineering/lossless-claw/pull/1239) [`6d2fedc`](https://github.com/Martian-Engineering/lossless-claw/commit/6d2fedc72d3107eb49b1d364a9560c2ecad4f98f) Thanks [@jalehman](https://github.com/jalehman)! - Restore raw user replay identity during `assemble` from replay keys recorded at transcript ingestion, instead of reading the whole visible transcript on every turn where live user messages carry an `idempotencyKey`. Rows stored before replay keys were recorded are filled from one full visible read, then served from storage.
+
+- [#1249](https://github.com/Martian-Engineering/lossless-claw/pull/1249) [`0358968`](https://github.com/Martian-Engineering/lossless-claw/commit/0358968f414b6b69446ab72eeda751f4b2902165) Thanks [@razethion](https://github.com/razethion)! - Use the existing opaque-binary token allowance when estimating structured tool results, including nested image data. This prevents base64 image bytes from overriding the full-message estimate and producing inflated context pressure. Preserve text estimates, including literal data URLs in text blocks, per-image accounting, and the tool-result safety margin.
+
+- [#1250](https://github.com/Martian-Engineering/lossless-claw/pull/1250) [`6f3f154`](https://github.com/Martian-Engineering/lossless-claw/commit/6f3f15477295035d3eef655c9e81c1bd69cd1661) Thanks [@siraustin](https://github.com/siraustin)! - lcm_grep and lcm_expand now mirror their rendered text into `details.text`, and lcm_grep adds typed `messages` / `summaries` / `files` hit arrays (ids, timestamps, 200-char snippets) to `details`. OpenClaw code mode and tool search hand the model a tool's `details` value, not its `content`, so until now a code-mode caller received only the match counts and could not see which messages matched.
+
+- [#1253](https://github.com/Martian-Engineering/lossless-claw/pull/1253) [`812eb22`](https://github.com/Martian-Engineering/lossless-claw/commit/812eb2251acf655712914b6e1abdebb509331e0f) Thanks [@jalehman](https://github.com/jalehman)! - Deferred maintenance and post-turn compaction evaluation now use the host's current `runtimeSettings.limits.promptTokenBudget` when one is supplied, instead of the 128,000-token fallback or a budget recorded for an earlier model. When a direct budget is also present, the smaller value wins. `maxAssemblyTokenBudget` still acts as a ceiling, and hosts that supply no budget keep the conservative behavior.
+
+- [#1254](https://github.com/Martian-Engineering/lossless-claw/pull/1254) [`15fc9d6`](https://github.com/Martian-Engineering/lossless-claw/commit/15fc9d6156817d165c49eeb6e1a9316abb73b0c6) Thanks [@jalehman](https://github.com/jalehman)! - Allow forced overflow recovery when OpenClaw includes display-only nested-tool transcript rows. Count only persistable roles when verifying complete current-turn coverage after delta ingestion. Preserve the initiating user, stored history, and recovery refusal checks; emit count-only diagnostics without transcript content.
+
+- [#1211](https://github.com/Martian-Engineering/lossless-claw/pull/1211) [`e05d8d3`](https://github.com/Martian-Engineering/lossless-claw/commit/e05d8d34b2a44fdef556ce95dd90115b46630200) Thanks [@TheAngryPit](https://github.com/TheAngryPit)! - Exclude archived conversations' historical pending maintenance debt and failure summaries from the actionable totals reported by `lcm status`.
+
+- [#1243](https://github.com/Martian-Engineering/lossless-claw/pull/1243) [`13a9b6a`](https://github.com/Martian-Engineering/lossless-claw/commit/13a9b6af3197e4fd787eac3969e97929ab39ccce) Thanks [@jalehman](https://github.com/jalehman)! - Remove the legacy full-transcript reconcile path, which no supported OpenClaw release reaches since transcript ingestion moved to the visible-delta cursor. Existing anchor-trust and transcript-epoch rows are left in place.
+
+- [#1259](https://github.com/Martian-Engineering/lossless-claw/pull/1259) [`c063fe1`](https://github.com/Martian-Engineering/lossless-claw/commit/c063fe1c8ad93c0cd9bb38684c87e6c43fcd988f) Thanks [@jalehman](https://github.com/jalehman)! - Treat OpenClaw model-runtime reload admission rejections as host runtime lifecycle interruptions. Summarization now keeps pending summaries and compaction debt for a later drain instead of logging provider failures and persisting deterministic fallback summaries. Hosts that report the `LLM_RUNTIME_LIFECYCLE` completion error code are recognized by that code; older hosts keep the existing message and `admissionBlocked` detection.
+
+- [#1245](https://github.com/Martian-Engineering/lossless-claw/pull/1245) [`6a5915f`](https://github.com/Martian-Engineering/lossless-claw/commit/6a5915f7420835ac5beaa409975234dcfa284890) Thanks [@jalehman](https://github.com/jalehman)! - Report summarization interrupted by host runtime retirement ("Plugin inventory has retired", "Async work scope is closed") as a single warning instead of two error lines; pending summaries and compaction debt stay queued for the next drain.
+
+- [#1253](https://github.com/Martian-Engineering/lossless-claw/pull/1253) [`812eb22`](https://github.com/Martian-Engineering/lossless-claw/commit/812eb2251acf655712914b6e1abdebb509331e0f) Thanks [@jalehman](https://github.com/jalehman)! - `lcm-tui` repair, rewrite, and backfill now default to `claude-sonnet-4-6` when no summary model is configured. The previous default, `claude-sonnet-4-20250514`, was retired by Anthropic and returned 404 errors.
+
+## 1.1.1
+
+<!-- release-rollback-version: 1.1.0 -->
+
+### Patch Changes
+
+- [#1174](https://github.com/Martian-Engineering/lossless-claw/pull/1174) [`2580af0`](https://github.com/Martian-Engineering/lossless-claw/commit/2580af0c55f4515bb8ce3895b874a1a70b9d1edd) Thanks [@Marvinthebored](https://github.com/Marvinthebored)! - Adopt a projected transcript entry id onto a live-ingested user row by the row's created time when the message body repeats in the projection. Repeated bodies such as restart-recovery prompts were imported as a second row, and assembly then alternated between the two rows across runs, breaking the provider prompt-cache prefix.
+
+  Require unambiguous matches in both the stored history and the full projection before assigning entry IDs. Preserve ambiguity across timestamp adoption and anchor audit, including nearby repeats and missing timestamps.
+
+- [#1189](https://github.com/Martian-Engineering/lossless-claw/pull/1189) [`a5ffa90`](https://github.com/Martian-Engineering/lossless-claw/commit/a5ffa9035804bcf90bf18072f94339e49d6fb877) Thanks [@sitanwen](https://github.com/sitanwen)! - Allow delegated sessions to retrieve externalized tool output from their own active LCM conversation while preserving the grant boundary for all other conversations.
+
+- [#1204](https://github.com/Martian-Engineering/lossless-claw/pull/1204) [`8e3050c`](https://github.com/Martian-Engineering/lossless-claw/commit/8e3050c1d5d5e46911b480815884276834ab6080) Thanks [@jalehman](https://github.com/jalehman)! - Try prepared-summary publication and bounded foreground compaction before pressure-driven context eviction. Measure serialized assembly pressure even without recorded maintenance debt, preserve generation cooldowns, and rebuild context after publication. Retain unresolved work and report why bounded fallback remains necessary.
+
+- [#1172](https://github.com/Martian-Engineering/lossless-claw/pull/1172) [`1ce937f`](https://github.com/Martian-Engineering/lossless-claw/commit/1ce937f49112c16898e7aface93513e2ead4f9da) Thanks [@Patrick-Erichsen](https://github.com/Patrick-Erichsen)! - Add author-defined settings groups for OpenClaw `2026.9.5` and newer hosts that support manifest `configGroups`. Older hosts retain the complete flat settings form; configuration paths and runtime behavior are unchanged. Publish fixed runtime defaults for the settings editor and identify automatically calculated values without turning them into fixed overrides.
+
+- [#1210](https://github.com/Martian-Engineering/lossless-claw/pull/1210) [`796e4f9`](https://github.com/Martian-Engineering/lossless-claw/commit/796e4f9696899925e077d48782f9d0a44cc65cbe) Thanks [@jalehman](https://github.com/jalehman)! - Preserve provider retry metadata when a publication-only maintenance check cannot advance. Publishing prepared summaries through manual or forced compaction keeps the generation cooldown intact unless new model-backed preparation is required.
+
+- [#1203](https://github.com/Martian-Engineering/lossless-claw/pull/1203) [`4ac610f`](https://github.com/Martian-Engineering/lossless-claw/commit/4ac610fbde4e80106329b6ae6c6f701638d9bb57) Thanks [@jalehman](https://github.com/jalehman)! - Allow compaction to atomically publish a contiguous ready summary prefix while remaining chunks or condensation are unfinished, including during summarization cooldown. Preserve pending suffix work, canonical lineage, original messages, and the protected fresh tail; report remaining preparation after partial publication.
+
+- [#1208](https://github.com/Martian-Engineering/lossless-claw/pull/1208) [`762f01c`](https://github.com/Martian-Engineering/lossless-claw/commit/762f01c90feaec4fd8ad44f117a4f215a39b68de) Thanks [@jalehman](https://github.com/jalehman)! - Repair outgoing history that begins with an incomplete historical tool turn, including after bounded bootstrap. Keep the initiating user when clamping a complete tool exchange, and preserve stored history and host-owned userless continuations.
+
+- [#1209](https://github.com/Martian-Engineering/lossless-claw/pull/1209) [`17a944f`](https://github.com/Martian-Engineering/lossless-claw/commit/17a944fa48f4b11a144538c740a5e003ec10f730) Thanks [@jalehman](https://github.com/jalehman)! - Keep deferred maintenance pending when explicit compaction commits progress but cannot finish. Preserve retry deadlines and discard stale prompt-size observations after summaries change the context, so later maintenance evaluates the reduced history.
+
+- [#1196](https://github.com/Martian-Engineering/lossless-claw/pull/1196) [`544c6c8`](https://github.com/Martian-Engineering/lossless-claw/commit/544c6c8424f74e0469f9219cf83d9147167d007b) Thanks [@pavonis-martian](https://github.com/pavonis-martian)! - Treat retired OpenClaw plugin inventories as lifecycle interruptions during summarization. Preserve pending work for a fresh maintenance invocation without creating fallback summaries or consuming pending-node retries.
+
+- [#1215](https://github.com/Martian-Engineering/lossless-claw/pull/1215) [`762c9b8`](https://github.com/Martian-Engineering/lossless-claw/commit/762c9b8b4f534f525666ca0ced0160d10acd3b66) Thanks [@jalehman](https://github.com/jalehman)! - Bound prompt-assembly work when internal events require trimming history. Evict the oldest eligible history groups instead of repeatedly comparing every candidate projection. Keep tool exchanges with their initiating user, preserve protected recent and live inputs, and report when those inputs exceed the budget. Stored messages and parts are unchanged.
+
+## 1.1.0
+
+<!-- release-rollback-version: 1.0.0 -->
+
+### OpenClaw host note
+
+OpenClaw 2026.9.2 and 2026.9.4 can duplicate the current user message in model
+context during bootstrap. This pre-existing host issue is fixed upstream in
+[OpenClaw #149690](https://github.com/openclaw/openclaw/pull/149690). A source
+build containing that fix passes a fresh two-turn gateway check with this
+Lossless release candidate. OpenClaw 2026.9.5 is the expected fixed release;
+confirm its stable publication before upgrading. Lossless 1.1.0 retains its
+OpenClaw 2026.9.2 minimum.
+
+### Minor Changes
+
+- [#1185](https://github.com/Martian-Engineering/lossless-claw/pull/1185) [`c82b992`](https://github.com/Martian-Engineering/lossless-claw/commit/c82b992551d5c18a1a6d982be5c933733d88a342) Thanks [@jalehman](https://github.com/jalehman)! - Add a read-only Context explorer native session panel with active-summary
+  metadata, token totals, summary text, and child-summary drill-down. Explicitly
+  distinguish stored active context from the last model prompt. Require OpenClaw
+  2026.9.2+, the first stable release with native plugin UI; older hosts can keep
+  their compatible Lossless release and use lcm-tui.
+
+- [#1185](https://github.com/Martian-Engineering/lossless-claw/pull/1185) [`c82b992`](https://github.com/Martian-Engineering/lossless-claw/commit/c82b992551d5c18a1a6d982be5c933733d88a342) Thanks [@jalehman](https://github.com/jalehman)! - Add a compact version/database footer, reveal flagged summaries directly from
+  Context explorer checks, and offer a native-style, explicitly confirmed repair
+  flow with doctor preflights and offline acknowledgement. Scope confirmations to
+  the reviewed targets, preserve backup-first repairs, reject stale/concurrent
+  requests, and clear emergency markers after successful rewrites.
+
+- [#1185](https://github.com/Martian-Engineering/lossless-claw/pull/1185) [`c82b992`](https://github.com/Martian-Engineering/lossless-claw/commit/c82b992551d5c18a1a6d982be5c933733d88a342) Thanks [@jalehman](https://github.com/jalehman)! - Show doctor-aligned fallback, truncation, and emergency warnings in the Context
+  explorer, including nested summaries. Add an on-demand, read-only summary quality
+  check for the selected conversation without model calls or repair side effects.
+
+- [#1170](https://github.com/Martian-Engineering/lossless-claw/pull/1170) [`db29bc6`](https://github.com/Martian-Engineering/lossless-claw/commit/db29bc6dbeb1d9181ba020379b6f7ffc96079d4b) Thanks [@cv-forever](https://github.com/cv-forever)! - Add the opt-in `preserveHeartbeatPoll` configuration option to retain heartbeat poll events in stored and assembled context. When `pruneHeartbeatOk` is enabled, preserve poll and intermediate messages while removing pure `HEARTBEAT_OK` acknowledgements across transcript projection and durable turn commits.
+
+### Patch Changes
+
+- [#1145](https://github.com/Martian-Engineering/lossless-claw/pull/1145) [`c6d06e5`](https://github.com/Martian-Engineering/lossless-claw/commit/c6d06e528867004c85ae84897019d94f0cdbea50) Thanks [@jalehman](https://github.com/jalehman)! - Accept the retired `transcriptGcEnabled` and `autoRotateSessionFiles` settings so upgrades from 0.15 continue to load. Lossless ignores both settings and logs a startup warning that asks operators to remove them.
+
+- [#1185](https://github.com/Martian-Engineering/lossless-claw/pull/1185) [`c82b992`](https://github.com/Martian-Engineering/lossless-claw/commit/c82b992551d5c18a1a6d982be5c933733d88a342) Thanks [@jalehman](https://github.com/jalehman)! - Make Context explorer inherit the selected OpenClaw theme’s colors, accents,
+  focus outlines, hover surfaces, and UI font, including live theme changes.
+
+- [#1185](https://github.com/Martian-Engineering/lossless-claw/pull/1185) [`c82b992`](https://github.com/Martian-Engineering/lossless-claw/commit/c82b992551d5c18a1a6d982be5c933733d88a342) Thanks [@jalehman](https://github.com/jalehman)! - Show numeric summary depth badges (D0, D1, and higher) in Context explorer and
+  add an accessible loading spinner to the repair confirmation button.
+
+- [#1185](https://github.com/Martian-Engineering/lossless-claw/pull/1185) [`c82b992`](https://github.com/Martian-Engineering/lossless-claw/commit/c82b992551d5c18a1a6d982be5c933733d88a342) Thanks [@jalehman](https://github.com/jalehman)! - Polish Context explorer with readable source-summary previews, friendlier labels,
+  leaf-only message counts, and a compact conversation-size and doctor-compatible
+  compression overview. Hide internal summary IDs.
+
+- [#1185](https://github.com/Martian-Engineering/lossless-claw/pull/1185) [`c82b992`](https://github.com/Martian-Engineering/lossless-claw/commit/c82b992551d5c18a1a6d982be5c933733d88a342) Thanks [@jalehman](https://github.com/jalehman)! - Rename the context explorer session tab to LCM.
+
+- [#1185](https://github.com/Martian-Engineering/lossless-claw/pull/1185) [`c82b992`](https://github.com/Martian-Engineering/lossless-claw/commit/c82b992551d5c18a1a6d982be5c933733d88a342) Thanks [@jalehman](https://github.com/jalehman)! - Make Context explorer scrollable with sanitized Markdown previews, full-summary
+  expansion, and recursively indented descendant summaries.
+
+- [#1185](https://github.com/Martian-Engineering/lossless-claw/pull/1185) [`c82b992`](https://github.com/Martian-Engineering/lossless-claw/commit/c82b992551d5c18a1a6d982be5c933733d88a342) Thanks [@jalehman](https://github.com/jalehman)! - Check the LCM panel against OpenClaw's public SDK types instead of a locally maintained structural subset, without adding host runtime code to the browser bundle.
+
+- [#1155](https://github.com/Martian-Engineering/lossless-claw/pull/1155) [`188b235`](https://github.com/Martian-Engineering/lossless-claw/commit/188b235e46839893ef52a4915ba0e98206b94ff9) Thanks [@FtlC-ian](https://github.com/FtlC-ian)! - Avoid scanning unrelated message history when resolving summary source ranges. This prevents repeated synchronous database scans from stalling context assembly on large databases while preserving summary coverage and generated context.
+
+- [#1186](https://github.com/Martian-Engineering/lossless-claw/pull/1186) [`fb03f8a`](https://github.com/Martian-Engineering/lossless-claw/commit/fb03f8a79671489ac4d565cda1c9246c5d0a5f20) Thanks [@jalehman](https://github.com/jalehman)! - Report forced compaction as changed only when a summary pass commits work. Preserve partial progress when later passes fail, and avoid opening summary-spend backoff when no model or custom summarizer call was attempted.
+
+- [#1184](https://github.com/Martian-Engineering/lossless-claw/pull/1184) [`c4b5090`](https://github.com/Martian-Engineering/lossless-claw/commit/c4b5090690222c831b08deda3f98da4db2fa49a9) Thanks [@jalehman](https://github.com/jalehman)! - Run pending-summary preparation and deferred compaction in awaited, host-owned
+  background maintenance instead of detached turn callbacks. Preserve prepare-only
+  and threshold publication behavior without blocking foreground ingestion. Treat
+  closed host async scopes as lifecycle failures rather than provider failures,
+  preventing provider retries and deterministic fallback for this condition.
+
+- [#1163](https://github.com/Martian-Engineering/lossless-claw/pull/1163) [`703cc0f`](https://github.com/Martian-Engineering/lossless-claw/commit/703cc0f57a50b667cdd7e767fd9808c533a3cfb4) Thanks [@jalehman](https://github.com/jalehman)! - Preserve retained user replay identity and adjacent OpenClaw runtime context during context assembly.
+
+- [#1175](https://github.com/Martian-Engineering/lossless-claw/pull/1175) [`6586d56`](https://github.com/Martian-Engineering/lossless-claw/commit/6586d56efa7c53af7eb8c6807335f79cdcc9e42e) Thanks [@PollyBot13](https://github.com/PollyBot13)! - Reduce bootstrap reconciliation work without changing transcript-anchor checks: avoid token accounting for identity-only comparisons and skip adoption attempts on rows that already have transcript IDs.
+
+- [#1188](https://github.com/Martian-Engineering/lossless-claw/pull/1188) [`3a2409c`](https://github.com/Martian-Engineering/lossless-claw/commit/3a2409c55dd6aab5298e25601564b3cc6d2d233a) Thanks [@jalehman](https://github.com/jalehman)! - Recover first-turn and tool-heavy context overflows by reconciling the authoritative OpenClaw transcript and summarizing older complete tool groups while preserving the initiating user, recent raw context, and persisted history. Refuse current-turn compaction when transcript coverage or tool pairing is uncertain.
+
+- [#1149](https://github.com/Martian-Engineering/lossless-claw/pull/1149) [`c84dd8c`](https://github.com/Martian-Engineering/lossless-claw/commit/c84dd8cff727eff3bb6c9a26f3cf4c0510fbc343) Thanks [@jarvis-mns1](https://github.com/jarvis-mns1)! - Keep assistant tool calls and their results as one atomic unit when degraded or serialized-budget fallback trims live context. This prevents oversized multimodal tool results from reaching providers as orphaned outputs and failing the next model request.
+
+- [#1162](https://github.com/Martian-Engineering/lossless-claw/pull/1162) [`a3eedf5`](https://github.com/Martian-Engineering/lossless-claw/commit/a3eedf5c94ea838fa0a1eeb28bb2388eb450de78) Thanks [@Marvinthebored](https://github.com/Marvinthebored)! - Verify structured tool provenance and payloads before adopting transcript anchors or deduplicating replays. Treat blank-text and ambiguous weak matches as unproven, and stop re-verifying mismatched legacy tool anchors. Preserve all message content when continuity is uncertain.
+
+- [#1157](https://github.com/Martian-Engineering/lossless-claw/pull/1157) [`946441f`](https://github.com/Martian-Engineering/lossless-claw/commit/946441fcd1fd8b13044fc066f434b9ca9455a42a) Thanks [@mpz4life](https://github.com/mpz4life)! - Clear deferred compaction debt when a threshold sweep made progress, then stalled above the ideal target, and both the stored context and observed prompt projection fit the token budget. Keep recoverable debt pending when a sweep stops at a work limit or is still reducing context. Sweeps without a usable observed prompt count retain the strict threshold verdict.
+
+- [#1165](https://github.com/Martian-Engineering/lossless-claw/pull/1165) [`621b702`](https://github.com/Martian-Engineering/lossless-claw/commit/621b702e349f22444e362c2a1db14f87c6fc3ca9) Thanks [@igs-rogenlo](https://github.com/igs-rogenlo)! - Report `no_override_matched_window_metadata_absent` when no context threshold override matches, a window-range rule is configured, and the host supplies no model context-window metadata. This distinguishes missing metadata from an out-of-range window without changing threshold selection.
+
+## 1.0.0
+
+<!-- release-rollback-version: 0.15.6 -->
+
+### Major Changes
+
+- [#952](https://github.com/Martian-Engineering/lossless-claw/pull/952) [`d98a7dd`](https://github.com/Martian-Engineering/lossless-claw/commit/d98a7ddf189e4e62bdf998c9f706cd7108b9fc75) Thanks [@jalehman](https://github.com/jalehman)! - Remove Lossless-owned transcript GC and session-file rotation surfaces for the SQLite-backed OpenClaw runtime. Active transcript storage is now owned by OpenClaw; Lossless no longer exposes `/lossless rotate`, transcript GC config, or automatic session-file rotation config. Existing plugin configs must remove `transcriptGcEnabled` and `autoRotateSessionFiles` before upgrading because OpenClaw's manifest validation rejects removed config keys.
+
+### Patch Changes
+
+- [#1114](https://github.com/Martian-Engineering/lossless-claw/pull/1114) [`4bcfc06`](https://github.com/Martian-Engineering/lossless-claw/commit/4bcfc069bed764ec29ecda2888cf714435e8129d) Thanks [@jalehman](https://github.com/jalehman)! - Move Lossless Claw 1.0 install, update, migration, and status repair commands to npm's stable `latest` channel. Installations that still follow `beta` receive repair guidance for the stable track.
+
+- [#1116](https://github.com/Martian-Engineering/lossless-claw/pull/1116) [`0fef96b`](https://github.com/Martian-Engineering/lossless-claw/commit/0fef96b8592c386f428512222bae62d0ff0309c7) Thanks [@jalehman](https://github.com/jalehman)! - Precompute live-coverage signatures before exact prompt-time reconciliation.
+
+- [#1102](https://github.com/Martian-Engineering/lossless-claw/pull/1102) [`c686ad1`](https://github.com/Martian-Engineering/lossless-claw/commit/c686ad1371b3187096f9e167424506dad2533460) Thanks [@jalehman](https://github.com/jalehman)! - Publish the built npm tarball through ClawHub so marketplace installs include the declared `dist/index.js` extension entrypoint.
+
+- [#1142](https://github.com/Martian-Engineering/lossless-claw/pull/1142) [`bf3d69e`](https://github.com/Martian-Engineering/lossless-claw/commit/bf3d69ef376030f749dbfa92be0c5e2abee59550) Thanks [@jalehman](https://github.com/jalehman)! - Add read-only inactive compaction-debt diagnostics and a backup-first, explicitly confirmed administrative close command that preserves recall data.
+
+- [#1122](https://github.com/Martian-Engineering/lossless-claw/pull/1122) [`abbea93`](https://github.com/Martian-Engineering/lossless-claw/commit/abbea93fab76f30a0cc57a232594a53ca47584fc) Thanks [@jalehman](https://github.com/jalehman)! - Expose the four Lossless recall tools through OpenClaw's coding, messaging, and full tool profiles, and mark their read-only executions as replay-safe.
+
+- [#1126](https://github.com/Martian-Engineering/lossless-claw/pull/1126) [`479beb6`](https://github.com/Martian-Engineering/lossless-claw/commit/479beb6760dfc21960e13180514998e085f9cfa1) Thanks [@t3t5ujin](https://github.com/t3t5ujin)! - Deduplicate host-accepted turn messages against the covered transcript frontier before recording a durable advancement, preventing native runtimes from storing a second copy when transcript projection ingestion wins the race while preserving unflushed suffixes and ambiguous data.
+
+- [#1142](https://github.com/Martian-Engineering/lossless-claw/pull/1142) [`e9f8fe4`](https://github.com/Martian-Engineering/lossless-claw/commit/e9f8fe45026b181b4a5c51791135b2fc700f4a3e) Thanks [@jalehman](https://github.com/jalehman)! - Preserve each message's role in leaf-summary source text rebuilt by `doctor apply`,
+  so repaired summaries can distinguish operator input from assistant and tool content.
+
+- [#1070](https://github.com/Martian-Engineering/lossless-claw/pull/1070) [`267f006`](https://github.com/Martian-Engineering/lossless-claw/commit/267f00696fd8266d57dc223ccaa91c20d9f871e6) Thanks [@hannesrudolph](https://github.com/hannesrudolph)! - Persist accepted OpenClaw turns with an atomic idempotency ledger so host retries cannot duplicate or partially advance LosslessClaw context.
+
+- [#1134](https://github.com/Martian-Engineering/lossless-claw/pull/1134) [`aa85938`](https://github.com/Martian-Engineering/lossless-claw/commit/aa859380faa6e68ec55255e5e257db95b3d1c541) Thanks [@jalehman](https://github.com/jalehman)! - Leave configured threshold headroom when OpenClaw forces overflow recovery, preventing a raw context-window budget from causing no-op compaction.
+
+- [#1108](https://github.com/Martian-Engineering/lossless-claw/pull/1108) [`b3e144b`](https://github.com/Martian-Engineering/lossless-claw/commit/b3e144b8683445454f27a6c23ad35c35b8ad3c84) Thanks [@jalehman](https://github.com/jalehman)! - Inherit OpenClaw's effective default model during context-free durable `commitTurn` summary preparation when no Lossless summary override is configured. Automatic pending-summary work now retains raw context instead of persisting emergency truncations when no model-backed summarizer can be resolved.
+
+- [#952](https://github.com/Martian-Engineering/lossless-claw/pull/952) [`d98a7dd`](https://github.com/Martian-Engineering/lossless-claw/commit/d98a7ddf189e4e62bdf998c9f706cd7108b9fc75) Thanks [@jalehman](https://github.com/jalehman)! - Keep CLI conversation diagnostics readable for databases that retain a legacy transcript bootstrap table without newer reconciliation and fork columns.
+
+- [#1052](https://github.com/Martian-Engineering/lossless-claw/pull/1052) [`fa578d0`](https://github.com/Martian-Engineering/lossless-claw/commit/fa578d028c90bee4166603c83f2a7335b721e23e) Thanks [@octo-patch](https://github.com/octo-patch)! - Add MiniMax API-key support to standalone TUI summarization with global and China endpoints and `MiniMax-M3` model inference.
+
+- [#952](https://github.com/Martian-Engineering/lossless-claw/pull/952) [`d98a7dd`](https://github.com/Martian-Engineering/lossless-claw/commit/d98a7ddf189e4e62bdf998c9f706cd7108b9fc75) Thanks [@jalehman](https://github.com/jalehman)! - Publish pending summaries for the longest prepared projection prefix, bridge undersized raw islands when later eligible work would otherwise become unreachable, leave undersized trailing suffixes live, refresh deferred pressure after publication, report the active post-publication token count to the host, and avoid double-counting raw backlog as threshold pressure when it is already present in the active projection.
+
+- [#1030](https://github.com/Martian-Engineering/lossless-claw/pull/1030) [`f25e54b`](https://github.com/Martian-Engineering/lossless-claw/commit/f25e54bca7762c9588a76fd840bdc77e916a658e) Thanks [@cxbAsDev](https://github.com/cxbAsDev)! - Remove duplicate `largeFilesDir` declarations from `openclaw.plugin.json`. The surviving entries describe the default as relative to `OPENCLAW_STATE_DIR`, consistent with the runtime resolver and configuration reference. A regression test now guards against duplicate keys and stale default descriptions.
+
+- [#1057](https://github.com/Martian-Engineering/lossless-claw/pull/1057) [`8f65b00`](https://github.com/Martian-Engineering/lossless-claw/commit/8f65b00b0b0f7dc34b549c36266a974c4e9e2bec) Thanks [@gorkem2020](https://github.com/gorkem2020)! - Preserve completed trailing assistant replies in degraded context assembly when
+  OpenClaw supplies the current user prompt separately, while continuing to strip
+  blank assistant prefill tails.
+
+- [#1106](https://github.com/Martian-Engineering/lossless-claw/pull/1106) [`fe891a4`](https://github.com/Martian-Engineering/lossless-claw/commit/fe891a41ea8f3482d4664e8666b0bd46dc26aa75) Thanks [@astra-openclaw](https://github.com/astra-openclaw)! - Preserve stable `thread_bootstrap` projection metadata when a managed conversation uses bounded or degraded live fallback, preventing persistent Codex threads from appending the reconstructed transcript again on every turn while compaction maintenance is pending.
+
+- Preserve allowlisted OpenClaw group sender identity through SQLite storage, replay, transcript migration, and leaf-summary source text.
+
+- [#1091](https://github.com/Martian-Engineering/lossless-claw/pull/1091) [`4aa98c6`](https://github.com/Martian-Engineering/lossless-claw/commit/4aa98c6f81992363a74a1b44a1cefaf5fee8d059) Thanks [@jalehman](https://github.com/jalehman)! - Preserve new `afterTurn` messages when an unaligned runtime batch only partially overlaps persisted history. Ambiguous mixed batches now ingest in full instead of repeatedly discarding genuine turns beside recurring control rows.
+
+- [#1091](https://github.com/Martian-Engineering/lossless-claw/pull/1091) [`4aa98c6`](https://github.com/Martian-Engineering/lossless-claw/commit/4aa98c6f81992363a74a1b44a1cefaf5fee8d059) Thanks [@jalehman](https://github.com/jalehman)! - Preserve distinct tool results when a model reuses tool-call IDs across turns. Only provider-minted IDs now participate in conversation-global event deduplication, and unexpected stable-key collisions retain the row without the conflicting key.
+
+- [#1053](https://github.com/Martian-Engineering/lossless-claw/pull/1053) [`9f5f5f5`](https://github.com/Martian-Engineering/lossless-claw/commit/9f5f5f54fc2d1880a3e728ab8533f83e31dee087) Thanks [@jetd1](https://github.com/jetd1)! - Preserve reasoning replay integrity for DB-assembled assistant messages.
+
+  Ingestion now records the assistant message's model identity
+  (`provider`/`api`/`model`/`responseModel`) in ordinal-0 part metadata, and
+  assembly re-attaches it so the host's model-bound thinking replay policy can
+  recognize same-model history instead of downgrading replayed thinking blocks
+  to plain text.
+
+  Assembly applies a three-way `thinkingSignature` gate:
+
+  1. **Sentinel `"reasoning_content"`** — the host's cross-provider reasoning-
+     native replay marker, not a provider-issued signature. Preserved only when
+     the assembled message carries stored model identity; dropped from legacy
+     rows without identity so the host's `transformMessages` doesn't downgrade
+     it to response-channel text (the contamination this patch fixes).
+
+  2. **Provider-issued signatures** — kept only when a stored model identity
+     survives to the assembled message (the host's `transformMessages` then
+     applies its own same-model replay policy). The identity gate is decided at
+     message level (identity lives on ordinal-0 metadata, but signature-bearing
+     blocks may sit at any ordinal).
+
+  3. **Legacy rows without identity** — keep the historical strip ([#365](https://github.com/Martian-Engineering/lossless-claw/issues/365)) for
+     provider-issued signatures; sentinel blocks are dropped entirely.
+
+  Comparison paths that treat part metadata as message identity
+  (`createLosslessMessageSignature`, `externalizedReplayMetadataMatches`) now
+  strip model-identity keys before comparing, so rows persisted before the
+  upgrade still match their post-upgrade live/assembled representations for
+  replay-prefix detection and live-coverage fork-anchor matching.
+
+- [#1130](https://github.com/Martian-Engineering/lossless-claw/pull/1130) [`bcaad7a`](https://github.com/Martian-Engineering/lossless-claw/commit/bcaad7aaaa4030f6ccbd020f1c31451c3abcee2a) Thanks [@jalehman](https://github.com/jalehman)! - Ignore top-level private OpenClaw metadata when estimating model-boundary tokens.
+
+- [#1111](https://github.com/Martian-Engineering/lossless-claw/pull/1111) [`5185250`](https://github.com/Martian-Engineering/lossless-claw/commit/5185250caa6afd64a4ba528576094b41f715ae85) Thanks [@astra-openclaw](https://github.com/astra-openclaw)! - Publish deterministic, raw-linked coverage for pending summary sources that sanitize empty, without retrying or calling the summary model, so later meaningful compaction work can continue and publish without an ordinal gap.
+
+- [#1136](https://github.com/Martian-Engineering/lossless-claw/pull/1136) [`bad9c34`](https://github.com/Martian-Engineering/lossless-claw/commit/bad9c344fab52733612117d39aa72ba1f0da594f) Thanks [@jalehman](https://github.com/jalehman)! - Remove the unsupported `contracts.sessionActions` manifest field while preserving the runtime `lcm-control` session action.
+
+- [#1089](https://github.com/Martian-Engineering/lossless-claw/pull/1089) [`13c70ec`](https://github.com/Martian-Engineering/lossless-claw/commit/13c70ecfd49109b39fadb889b2e7c072383a6e7b) Thanks [@PollyBot13](https://github.com/PollyBot13)! - Reopen the SQLite-backed context engine when OpenClaw starts a new gateway lifecycle from a cached plugin registry, preventing fallback to the legacy engine after in-process restarts and resolving the current host default model after config changes.
+
+- [#1061](https://github.com/Martian-Engineering/lossless-claw/pull/1061) [`ccad297`](https://github.com/Martian-Engineering/lossless-claw/commit/ccad297f076eb29ae42b3a72a38c3a4a6c07bfe6) Thanks [@jjjhenriksen](https://github.com/jjjhenriksen)! - Use OpenClaw's supported `subagent.getSessionMessages()` runtime method when collecting delegated expansion replies, restoring `lcm_expand_query` compatibility with current OpenClaw beta releases.
+
+- [#952](https://github.com/Martian-Engineering/lossless-claw/pull/952) [`d98a7dd`](https://github.com/Martian-Engineering/lossless-claw/commit/d98a7ddf189e4e62bdf998c9f706cd7108b9fc75) Thanks [@jalehman](https://github.com/jalehman)! - Give a complete pending-summary frontier a publication-only session-queue opportunity when context crosses the compaction threshold. Publication waits for foreground work already in progress, runs before later queued foreground work, and does not call the summary model. Incomplete frontiers remain deferred for background preparation.
+
+- [#1091](https://github.com/Martian-Engineering/lossless-claw/pull/1091) [`4aa98c6`](https://github.com/Martian-Engineering/lossless-claw/commit/4aa98c6f81992363a74a1b44a1cefaf5fee8d059) Thanks [@jalehman](https://github.com/jalehman)! - Separate host-owned prompt framing from Lossless-owned context during threshold compaction. Typed OpenClaw runtime ownership metadata now survives host-parameter projection and follows foreground, maintenance, and deferred compaction paths so uncompactable system, tool, or native-thread history cannot make convergence impossible.
+
+- [#952](https://github.com/Martian-Engineering/lossless-claw/pull/952) [`d98a7dd`](https://github.com/Martian-Engineering/lossless-claw/commit/d98a7ddf189e4e62bdf998c9f706cd7108b9fc75) Thanks [@jalehman](https://github.com/jalehman)! - Clamp assembled messages at 90% of the serialized output budget so OpenClaw's final renderer retains headroom for prompt and message-boundary overhead.
+
+- [#1089](https://github.com/Martian-Engineering/lossless-claw/pull/1089) [`13c70ec`](https://github.com/Martian-Engineering/lossless-claw/commit/13c70ecfd49109b39fadb889b2e7c072383a6e7b) Thanks [@PollyBot13](https://github.com/PollyBot13)! - Skip restart and shutdown `session_end` hooks before acquiring the context engine, preventing closed-database errors after `gateway_stop`.
+
+- [#952](https://github.com/Martian-Engineering/lossless-claw/pull/952) [`d98a7dd`](https://github.com/Martian-Engineering/lossless-claw/commit/d98a7ddf189e4e62bdf998c9f706cd7108b9fc75) Thanks [@jalehman](https://github.com/jalehman)! - Require OpenClaw 2026.7.2-beta.2 or newer for the branch-safe visible transcript projection used during SQLite session bootstrap, and preserve continuity when that projection uniquely matches a metadata-decorated runtime row.
+
+- [#1044](https://github.com/Martian-Engineering/lossless-claw/pull/1044) [`8ac4720`](https://github.com/Martian-Engineering/lossless-claw/commit/8ac47205d2598c0875b5efde93cb836a15986439) Thanks [@bowenluo718](https://github.com/bowenluo718)! - Fix duplicate ingestion of the same message when the transcript is
+  redacted by `logging.redactPatterns` and the live `afterTurn` batch is
+  not. Stable assistant response and unambiguous tool-call identities are
+  persisted in a new `messages.stable_event_key` column, checked before
+  ingest side effects, and protected by a partial unique index. Messages
+  without an unambiguous stable identity retain the existing
+  content-based and redaction-aware deduplication behavior.
+
+- [#952](https://github.com/Martian-Engineering/lossless-claw/pull/952) [`d98a7dd`](https://github.com/Martian-Engineering/lossless-claw/commit/d98a7ddf189e4e62bdf998c9f706cd7108b9fc75) Thanks [@jalehman](https://github.com/jalehman)! - Tighten the structural same-turn supersede so it only collapses a runtime or live copy onto a bare persisted row when the bare body is carried under a channel timestamp, rather than whenever the content merely contains the substring "(untrusted metadata)" or ends with a line equal to the bare body. Structured metadata blocks remain untrusted user-facing text until OpenClaw provides a trusted marker, so metadata-only copies are preserved rather than risk silently superseding an earlier user turn. The guard now covers both the store after-turn path and the assembly supersede path.
+
+- [#1042](https://github.com/Martian-Engineering/lossless-claw/pull/1042) [`4a19e16`](https://github.com/Martian-Engineering/lossless-claw/commit/4a19e160d107593ee30e7a2d4c74da7acc2a5d47) Thanks [@gorkem2020](https://github.com/gorkem2020)! - Require transcript provenance before untimestamped metadata-body matches can support covered-frontier replay alignment, while keeping unannounced recaps and heuristic matches fail-closed.
+
+- [#952](https://github.com/Martian-Engineering/lossless-claw/pull/952) [`d98a7dd`](https://github.com/Martian-Engineering/lossless-claw/commit/d98a7ddf189e4e62bdf998c9f706cd7108b9fc75) Thanks [@jalehman](https://github.com/jalehman)! - Document the OpenClaw host trust grant required to keep the Lossless `before_prompt_build` recall-policy hook active.
+
+- [#1077](https://github.com/Martian-Engineering/lossless-claw/pull/1077) [`d7d58ce`](https://github.com/Martian-Engineering/lossless-claw/commit/d7d58ce8bf78683d947d0582429c8ae51760da44) Thanks [@jalehman](https://github.com/jalehman)! - Accept the turn-local durable `commitTurn` payload defined by [OpenClaw PR 122149](https://github.com/openclaw/openclaw/pull/122149), and preserve idempotent retries for beta.1 receipts after the host removes `prePromptMessageCount`.
+
+- [#952](https://github.com/Martian-Engineering/lossless-claw/pull/952) [`d98a7dd`](https://github.com/Martian-Engineering/lossless-claw/commit/d98a7ddf189e4e62bdf998c9f706cd7108b9fc75) Thanks [@jalehman](https://github.com/jalehman)! - Verify SQLite transcript anchors before using them for reconciliation, repair safe non-empty legacy anchors, ignore false stale anchors, and add `/lossless doctor anchors` audit counts.
+
+## 1.0.0-beta.7
+
+<!-- release-rollback-version: 0.15.6 -->
+
+### Patch Changes
+
+- [#1126](https://github.com/Martian-Engineering/lossless-claw/pull/1126) [`479beb6`](https://github.com/Martian-Engineering/lossless-claw/commit/479beb6760dfc21960e13180514998e085f9cfa1) Thanks [@t3t5ujin](https://github.com/t3t5ujin)! - Deduplicate host-accepted turn messages against the covered transcript frontier before recording a durable advancement, preventing native runtimes from storing a second copy when transcript projection ingestion wins the race while preserving unflushed suffixes and ambiguous data.
+
+- [#1134](https://github.com/Martian-Engineering/lossless-claw/pull/1134) [`aa85938`](https://github.com/Martian-Engineering/lossless-claw/commit/aa859380faa6e68ec55255e5e257db95b3d1c541) Thanks [@jalehman](https://github.com/jalehman)! - Leave configured threshold headroom when OpenClaw forces overflow recovery, preventing a raw context-window budget from causing no-op compaction.
+
+- [#1106](https://github.com/Martian-Engineering/lossless-claw/pull/1106) [`fe891a4`](https://github.com/Martian-Engineering/lossless-claw/commit/fe891a41ea8f3482d4664e8666b0bd46dc26aa75) Thanks [@astra-openclaw](https://github.com/astra-openclaw)! - Preserve stable `thread_bootstrap` projection metadata when a managed conversation uses bounded or degraded live fallback, preventing persistent Codex threads from appending the reconstructed transcript again on every turn while compaction maintenance is pending.
+
+- [#1130](https://github.com/Martian-Engineering/lossless-claw/pull/1130) [`bcaad7a`](https://github.com/Martian-Engineering/lossless-claw/commit/bcaad7aaaa4030f6ccbd020f1c31451c3abcee2a) Thanks [@jalehman](https://github.com/jalehman)! - Ignore top-level private OpenClaw metadata when estimating model-boundary tokens.
+
+- [#1111](https://github.com/Martian-Engineering/lossless-claw/pull/1111) [`5185250`](https://github.com/Martian-Engineering/lossless-claw/commit/5185250caa6afd64a4ba528576094b41f715ae85) Thanks [@astra-openclaw](https://github.com/astra-openclaw)! - Publish deterministic, raw-linked coverage for pending summary sources that sanitize empty, without retrying or calling the summary model, so later meaningful compaction work can continue and publish without an ordinal gap.
+
+- [#1136](https://github.com/Martian-Engineering/lossless-claw/pull/1136) [`bad9c34`](https://github.com/Martian-Engineering/lossless-claw/commit/bad9c344fab52733612117d39aa72ba1f0da594f) Thanks [@jalehman](https://github.com/jalehman)! - Remove the unsupported `contracts.sessionActions` manifest field while preserving the runtime `lcm-control` session action.
+
+## 1.0.0-beta.6
+
+<!-- release-rollback-version: 0.15.5 -->
+
+### Patch Changes
+
+- [#1122](https://github.com/Martian-Engineering/lossless-claw/pull/1122) [`abbea93`](https://github.com/Martian-Engineering/lossless-claw/commit/abbea93fab76f30a0cc57a232594a53ca47584fc) Thanks [@jalehman](https://github.com/jalehman)! - Expose the four Lossless recall tools through OpenClaw's coding, messaging, and full tool profiles, and mark their read-only executions as replay-safe.
+
+## 1.0.0-beta.5
+
+<!-- release-rollback-version: 0.15.4 -->
+
+### Patch Changes
+
+- [#1114](https://github.com/Martian-Engineering/lossless-claw/pull/1114) [`4bcfc06`](https://github.com/Martian-Engineering/lossless-claw/commit/4bcfc069bed764ec29ecda2888cf714435e8129d) Thanks [@jalehman](https://github.com/jalehman)! - Keep Lossless Claw 1.0 install, update, migration, and status repair commands on the npm `beta` channel, and warn when an existing install still follows the incompatible 0.15.x `latest` channel.
+
+- [#1116](https://github.com/Martian-Engineering/lossless-claw/pull/1116) [`0fef96b`](https://github.com/Martian-Engineering/lossless-claw/commit/0fef96b8592c386f428512222bae62d0ff0309c7) Thanks [@jalehman](https://github.com/jalehman)! - Precompute live-coverage signatures before exact prompt-time reconciliation.
+
+- [`bf3d69e`](https://github.com/Martian-Engineering/lossless-claw/commit/bf3d69ef376030f749dbfa92be0c5e2abee59550) Thanks [@mvanhorn](https://github.com/mvanhorn)! - Add read-only inactive compaction-debt diagnostics and a backup-first, explicitly confirmed administrative close command that preserves recall data.
+
+- [`e9f8fe4`](https://github.com/Martian-Engineering/lossless-claw/commit/e9f8fe45026b181b4a5c51791135b2fc700f4a3e) Thanks [@syltharion](https://github.com/syltharion)! - Preserve each message's role in leaf-summary source text rebuilt by `doctor apply`,
+  so repaired summaries can distinguish operator input from assistant and tool content.
+
+- [#1108](https://github.com/Martian-Engineering/lossless-claw/pull/1108) [`b3e144b`](https://github.com/Martian-Engineering/lossless-claw/commit/b3e144b8683445454f27a6c23ad35c35b8ad3c84) Thanks [@jalehman](https://github.com/jalehman)! - Inherit OpenClaw's effective default model during context-free durable `commitTurn` summary preparation when no Lossless summary override is configured. Automatic pending-summary work now retains raw context instead of persisting emergency truncations when no model-backed summarizer can be resolved.
+
+## 1.0.0-beta.4
+
+<!-- release-rollback-version: 0.15.3 -->
+
+### Patch Changes
+
+- [#1102](https://github.com/Martian-Engineering/lossless-claw/pull/1102) [`c686ad1`](https://github.com/Martian-Engineering/lossless-claw/commit/c686ad1371b3187096f9e167424506dad2533460) Thanks [@jalehman](https://github.com/jalehman)! - Publish the built npm tarball through ClawHub so marketplace installs include the declared `dist/index.js` extension entrypoint.
+
+## 1.0.0-beta.3
+
+<!-- release-rollback-version: 0.15.2 -->
+
+### Patch Changes
+
+- [#1091](https://github.com/Martian-Engineering/lossless-claw/pull/1091) [`4aa98c6`](https://github.com/Martian-Engineering/lossless-claw/commit/4aa98c6f81992363a74a1b44a1cefaf5fee8d059) Thanks [@jalehman](https://github.com/jalehman)! - Preserve new `afterTurn` messages when an unaligned runtime batch only partially overlaps persisted history. Ambiguous mixed batches now ingest in full instead of repeatedly discarding genuine turns beside recurring control rows.
+
+- [#1091](https://github.com/Martian-Engineering/lossless-claw/pull/1091) [`4aa98c6`](https://github.com/Martian-Engineering/lossless-claw/commit/4aa98c6f81992363a74a1b44a1cefaf5fee8d059) Thanks [@jalehman](https://github.com/jalehman)! - Preserve distinct tool results when a model reuses tool-call IDs across turns. Only provider-minted IDs now participate in conversation-global event deduplication, and unexpected stable-key collisions retain the row without the conflicting key.
+
+- [#1089](https://github.com/Martian-Engineering/lossless-claw/pull/1089) [`13c70ec`](https://github.com/Martian-Engineering/lossless-claw/commit/13c70ecfd49109b39fadb889b2e7c072383a6e7b) Thanks [@PollyBot13](https://github.com/PollyBot13)! - Reopen the SQLite-backed context engine when OpenClaw starts a new gateway lifecycle from a cached plugin registry, preventing fallback to the legacy engine after in-process restarts and resolving the current host default model after config changes.
+
+- [#1091](https://github.com/Martian-Engineering/lossless-claw/pull/1091) [`4aa98c6`](https://github.com/Martian-Engineering/lossless-claw/commit/4aa98c6f81992363a74a1b44a1cefaf5fee8d059) Thanks [@jalehman](https://github.com/jalehman)! - Separate host-owned prompt framing from Lossless-owned context during threshold compaction. Typed OpenClaw runtime ownership metadata now survives host-parameter projection and follows foreground, maintenance, and deferred compaction paths so uncompactable system, tool, or native-thread history cannot make convergence impossible.
+
+- [#1089](https://github.com/Martian-Engineering/lossless-claw/pull/1089) [`13c70ec`](https://github.com/Martian-Engineering/lossless-claw/commit/13c70ecfd49109b39fadb889b2e7c072383a6e7b) Thanks [@PollyBot13](https://github.com/PollyBot13)! - Skip restart and shutdown `session_end` hooks before acquiring the context engine, preventing closed-database errors after `gateway_stop`.
+
+## 1.0.0-beta.2
+
+<!-- release-rollback-version: 0.15.1 -->
+
+### Patch Changes
+
+- [#1077](https://github.com/Martian-Engineering/lossless-claw/pull/1077) [`d7d58ce`](https://github.com/Martian-Engineering/lossless-claw/commit/d7d58ce8bf78683d947d0582429c8ae51760da44) Thanks [@jalehman](https://github.com/jalehman)! - Accept the turn-local durable `commitTurn` payload defined by [OpenClaw PR 122149](https://github.com/openclaw/openclaw/pull/122149), and preserve idempotent retries for beta.1 receipts after the host removes `prePromptMessageCount`.
+
+## 1.0.0-beta.1
+
+<!-- release-rollback-version: 0.15.1 -->
+
+### Patch Changes
+
+- [#1070](https://github.com/Martian-Engineering/lossless-claw/pull/1070) [`267f006`](https://github.com/Martian-Engineering/lossless-claw/commit/267f00696fd8266d57dc223ccaa91c20d9f871e6) Thanks [@hannesrudolph](https://github.com/hannesrudolph)! - Persist accepted OpenClaw turns with an atomic idempotency ledger so host retries cannot duplicate or partially advance LosslessClaw context.
+
+## 1.0.0-beta.0
+
+<!-- release-rollback-version: 0.15.1 -->
+
+### Major Changes
+
+- [#952](https://github.com/Martian-Engineering/lossless-claw/pull/952) [`d98a7dd`](https://github.com/Martian-Engineering/lossless-claw/commit/d98a7ddf189e4e62bdf998c9f706cd7108b9fc75) Thanks [@jalehman](https://github.com/jalehman)! - Remove Lossless-owned transcript GC and session-file rotation surfaces for the SQLite-backed OpenClaw runtime. Active transcript storage is now owned by OpenClaw; Lossless no longer exposes `/lossless rotate`, transcript GC config, or automatic session-file rotation config. Existing plugin configs must remove `transcriptGcEnabled` and `autoRotateSessionFiles` before upgrading because OpenClaw's manifest validation rejects removed config keys.
+
+### Patch Changes
+
+- [#952](https://github.com/Martian-Engineering/lossless-claw/pull/952) [`d98a7dd`](https://github.com/Martian-Engineering/lossless-claw/commit/d98a7ddf189e4e62bdf998c9f706cd7108b9fc75) Thanks [@jalehman](https://github.com/jalehman)! - Keep CLI conversation diagnostics readable for databases that retain a legacy transcript bootstrap table without newer reconciliation and fork columns.
+
+- [#1052](https://github.com/Martian-Engineering/lossless-claw/pull/1052) [`fa578d0`](https://github.com/Martian-Engineering/lossless-claw/commit/fa578d028c90bee4166603c83f2a7335b721e23e) Thanks [@octo-patch](https://github.com/octo-patch)! - Add MiniMax API-key support to standalone TUI summarization with global and China endpoints and `MiniMax-M3` model inference.
+
+- [#952](https://github.com/Martian-Engineering/lossless-claw/pull/952) [`d98a7dd`](https://github.com/Martian-Engineering/lossless-claw/commit/d98a7ddf189e4e62bdf998c9f706cd7108b9fc75) Thanks [@jalehman](https://github.com/jalehman)! - Publish pending summaries for the longest prepared projection prefix, bridge undersized raw islands when later eligible work would otherwise become unreachable, leave undersized trailing suffixes live, refresh deferred pressure after publication, report the active post-publication token count to the host, and avoid double-counting raw backlog as threshold pressure when it is already present in the active projection.
+
+- [#1030](https://github.com/Martian-Engineering/lossless-claw/pull/1030) [`f25e54b`](https://github.com/Martian-Engineering/lossless-claw/commit/f25e54bca7762c9588a76fd840bdc77e916a658e) Thanks [@cxbAsDev](https://github.com/cxbAsDev)! - Remove duplicate `largeFilesDir` declarations from `openclaw.plugin.json`. The surviving entries describe the default as relative to `OPENCLAW_STATE_DIR`, consistent with the runtime resolver and configuration reference. A regression test now guards against duplicate keys and stale default descriptions.
+
+- [#1057](https://github.com/Martian-Engineering/lossless-claw/pull/1057) [`8f65b00`](https://github.com/Martian-Engineering/lossless-claw/commit/8f65b00b0b0f7dc34b549c36266a974c4e9e2bec) Thanks [@gorkem2020](https://github.com/gorkem2020)! - Preserve completed trailing assistant replies in degraded context assembly when
+  OpenClaw supplies the current user prompt separately, while continuing to strip
+  blank assistant prefill tails.
+
+- [#1053](https://github.com/Martian-Engineering/lossless-claw/pull/1053) [`9f5f5f5`](https://github.com/Martian-Engineering/lossless-claw/commit/9f5f5f54fc2d1880a3e728ab8533f83e31dee087) Thanks [@jetd1](https://github.com/jetd1)! - Preserve reasoning replay integrity for DB-assembled assistant messages.
+
+  Ingestion now records the assistant message's model identity
+  (`provider`/`api`/`model`/`responseModel`) in ordinal-0 part metadata, and
+  assembly re-attaches it so the host's model-bound thinking replay policy can
+  recognize same-model history instead of downgrading replayed thinking blocks
+  to plain text.
+
+  Assembly applies a three-way `thinkingSignature` gate:
+
+  1. **Sentinel `"reasoning_content"`** — the host's cross-provider reasoning-
+     native replay marker, not a provider-issued signature. Preserved only when
+     the assembled message carries stored model identity; dropped from legacy
+     rows without identity so the host's `transformMessages` doesn't downgrade
+     it to response-channel text (the contamination this patch fixes).
+
+  2. **Provider-issued signatures** — kept only when a stored model identity
+     survives to the assembled message (the host's `transformMessages` then
+     applies its own same-model replay policy). The identity gate is decided at
+     message level (identity lives on ordinal-0 metadata, but signature-bearing
+     blocks may sit at any ordinal).
+
+  3. **Legacy rows without identity** — keep the historical strip ([#365](https://github.com/Martian-Engineering/lossless-claw/issues/365)) for
+     provider-issued signatures; sentinel blocks are dropped entirely.
+
+  Comparison paths that treat part metadata as message identity
+  (`createLosslessMessageSignature`, `externalizedReplayMetadataMatches`) now
+  strip model-identity keys before comparing, so rows persisted before the
+  upgrade still match their post-upgrade live/assembled representations for
+  replay-prefix detection and live-coverage fork-anchor matching.
+
+- [#1061](https://github.com/Martian-Engineering/lossless-claw/pull/1061) [`ccad297`](https://github.com/Martian-Engineering/lossless-claw/commit/ccad297f076eb29ae42b3a72a38c3a4a6c07bfe6) Thanks [@jjjhenriksen](https://github.com/jjjhenriksen)! - Use OpenClaw's supported `subagent.getSessionMessages()` runtime method when collecting delegated expansion replies, restoring `lcm_expand_query` compatibility with current OpenClaw beta releases.
+
+- [#952](https://github.com/Martian-Engineering/lossless-claw/pull/952) [`d98a7dd`](https://github.com/Martian-Engineering/lossless-claw/commit/d98a7ddf189e4e62bdf998c9f706cd7108b9fc75) Thanks [@jalehman](https://github.com/jalehman)! - Give a complete pending-summary frontier a publication-only session-queue opportunity when context crosses the compaction threshold. Publication waits for foreground work already in progress, runs before later queued foreground work, and does not call the summary model. Incomplete frontiers remain deferred for background preparation.
+
+- [#952](https://github.com/Martian-Engineering/lossless-claw/pull/952) [`d98a7dd`](https://github.com/Martian-Engineering/lossless-claw/commit/d98a7ddf189e4e62bdf998c9f706cd7108b9fc75) Thanks [@jalehman](https://github.com/jalehman)! - Clamp assembled messages at 90% of the serialized output budget so OpenClaw's final renderer retains headroom for prompt and message-boundary overhead.
+
+- [#952](https://github.com/Martian-Engineering/lossless-claw/pull/952) [`d98a7dd`](https://github.com/Martian-Engineering/lossless-claw/commit/d98a7ddf189e4e62bdf998c9f706cd7108b9fc75) Thanks [@jalehman](https://github.com/jalehman)! - Require OpenClaw 2026.7.2-beta.2 or newer for the branch-safe visible transcript projection used during SQLite session bootstrap, and preserve continuity when that projection uniquely matches a metadata-decorated runtime row.
+
+- [#1044](https://github.com/Martian-Engineering/lossless-claw/pull/1044) [`8ac4720`](https://github.com/Martian-Engineering/lossless-claw/commit/8ac47205d2598c0875b5efde93cb836a15986439) Thanks [@bowenluo718](https://github.com/bowenluo718)! - Fix duplicate ingestion of the same message when the transcript is
+  redacted by `logging.redactPatterns` and the live `afterTurn` batch is
+  not. Stable assistant response and unambiguous tool-call identities are
+  persisted in a new `messages.stable_event_key` column, checked before
+  ingest side effects, and protected by a partial unique index. Messages
+  without an unambiguous stable identity retain the existing
+  content-based and redaction-aware deduplication behavior.
+
+- [#952](https://github.com/Martian-Engineering/lossless-claw/pull/952) [`d98a7dd`](https://github.com/Martian-Engineering/lossless-claw/commit/d98a7ddf189e4e62bdf998c9f706cd7108b9fc75) Thanks [@jalehman](https://github.com/jalehman)! - Tighten the structural same-turn supersede so it only collapses a runtime or live copy onto a bare persisted row when the bare body is carried under a channel timestamp, rather than whenever the content merely contains the substring "(untrusted metadata)" or ends with a line equal to the bare body. Structured metadata blocks remain untrusted user-facing text until OpenClaw provides a trusted marker, so metadata-only copies are preserved rather than risk silently superseding an earlier user turn. The guard now covers both the store after-turn path and the assembly supersede path.
+
+- [#1042](https://github.com/Martian-Engineering/lossless-claw/pull/1042) [`4a19e16`](https://github.com/Martian-Engineering/lossless-claw/commit/4a19e160d107593ee30e7a2d4c74da7acc2a5d47) Thanks [@gorkem2020](https://github.com/gorkem2020)! - Require transcript provenance before untimestamped metadata-body matches can support covered-frontier replay alignment, while keeping unannounced recaps and heuristic matches fail-closed.
+
+- [#952](https://github.com/Martian-Engineering/lossless-claw/pull/952) [`d98a7dd`](https://github.com/Martian-Engineering/lossless-claw/commit/d98a7ddf189e4e62bdf998c9f706cd7108b9fc75) Thanks [@jalehman](https://github.com/jalehman)! - Document the OpenClaw host trust grant required to keep the Lossless `before_prompt_build` recall-policy hook active.
+
+- [#952](https://github.com/Martian-Engineering/lossless-claw/pull/952) [`d98a7dd`](https://github.com/Martian-Engineering/lossless-claw/commit/d98a7ddf189e4e62bdf998c9f706cd7108b9fc75) Thanks [@jalehman](https://github.com/jalehman)! - Verify SQLite transcript anchors before using them for reconciliation, repair safe non-empty legacy anchors, ignore false stale anchors, and add `/lossless doctor anchors` audit counts.
+
+## 0.15.6
+
+<!-- release-rollback-version: 0.15.5 -->
+
+### Patch Changes
+
+- [#1133](https://github.com/Martian-Engineering/lossless-claw/pull/1133) [`8b37ecb`](https://github.com/Martian-Engineering/lossless-claw/commit/8b37ecb188358d33bd00cd3438678257edd2e5fc) Thanks [@jalehman](https://github.com/jalehman)! - Leave configured threshold headroom when OpenClaw forces overflow recovery, preventing a raw context-window budget from causing no-op compaction.
+
+- [#1128](https://github.com/Martian-Engineering/lossless-claw/pull/1128) [`13e8405`](https://github.com/Martian-Engineering/lossless-claw/commit/13e8405e48f7774924155e6b2b8499ef2dedf2a0) Thanks [@PollyBot13](https://github.com/PollyBot13)! - Ignore top-level private OpenClaw metadata when estimating model-boundary tokens.
+
+- [#1135](https://github.com/Martian-Engineering/lossless-claw/pull/1135) [`34c5b73`](https://github.com/Martian-Engineering/lossless-claw/commit/34c5b73a2fee6c2a0868165b94f7d30d8325b24d) Thanks [@jalehman](https://github.com/jalehman)! - Remove the unsupported `contracts.sessionActions` manifest field while preserving the runtime `lcm-control` session action.
+
+## 0.15.5
+
+<!-- release-rollback-version: 0.15.4 -->
+
+### Patch Changes
+
+- [#1120](https://github.com/Martian-Engineering/lossless-claw/pull/1120) [`b31ad24`](https://github.com/Martian-Engineering/lossless-claw/commit/b31ad24a74bf882618788ff393edfe3a15e69af2) Thanks [@jalehman](https://github.com/jalehman)! - Expose the four Lossless recall tools through OpenClaw's coding, messaging, and full tool profiles, and mark their read-only executions as replay-safe.
+
+## 0.15.4
+
+<!-- release-rollback-version: 0.15.3 -->
+
+### Patch Changes
+
+- [#1115](https://github.com/Martian-Engineering/lossless-claw/pull/1115) [`f55ed7a`](https://github.com/Martian-Engineering/lossless-claw/commit/f55ed7af35bc751c631c0449b631cb149a741234) Thanks [@jalehman](https://github.com/jalehman)! - Precompute live-coverage signatures before exact prompt-time reconciliation.
+
+- [#1104](https://github.com/Martian-Engineering/lossless-claw/pull/1104) [`76d5b15`](https://github.com/Martian-Engineering/lossless-claw/commit/76d5b155fa8a41bf072082484a4e8232d3653a63) Thanks [@mvanhorn](https://github.com/mvanhorn)! - Add read-only inactive compaction-debt diagnostics and a backup-first, explicitly confirmed administrative close command that preserves recall data.
+
+- [#1034](https://github.com/Martian-Engineering/lossless-claw/pull/1034) [`707de4d`](https://github.com/Martian-Engineering/lossless-claw/commit/707de4d98fabdeea9352c3492321227f7e75b0a3) Thanks [@syltharion](https://github.com/syltharion)! - Preserve each message's role in leaf-summary source text rebuilt by `doctor apply`,
+  so repaired summaries can distinguish operator input from assistant and tool content.
+
+- [#1086](https://github.com/Martian-Engineering/lossless-claw/pull/1086) [`4214b48`](https://github.com/Martian-Engineering/lossless-claw/commit/4214b4809a819ec847fd7ba1463cab131e304d34) Thanks [@meatwife](https://github.com/meatwife)! - Separate typed host-owned prompt framing from Lossless compaction pressure and preserve stable thread-bootstrap projection metadata across managed degraded and fork-bounded fallbacks.
+
+## 0.15.3
+
+<!-- release-rollback-version: 0.15.2 -->
+
+### Patch Changes
+
+- [#1099](https://github.com/Martian-Engineering/lossless-claw/pull/1099) [`9a1b8e0`](https://github.com/Martian-Engineering/lossless-claw/commit/9a1b8e0ef6ed9199d4be543ee19c85ee05b091c3) Thanks [@jalehman](https://github.com/jalehman)! - Publish the built npm tarball through ClawHub so marketplace installs include the declared `dist/index.js` extension entrypoint.
+
+## 0.15.2
+
+<!-- release-rollback-version: 0.15.1 -->
+
+### Patch Changes
+
+- [#1075](https://github.com/Martian-Engineering/lossless-claw/pull/1075) [`8f4f240`](https://github.com/Martian-Engineering/lossless-claw/commit/8f4f240b00139fcefa158b57666442e96c6e2024) Thanks [@jalehman](https://github.com/jalehman)! - Preserve OpenClaw group sender identity through storage, replay, and leaf summaries.
+
+- [#1031](https://github.com/Martian-Engineering/lossless-claw/pull/1031) [`5f0ed32`](https://github.com/Martian-Engineering/lossless-claw/commit/5f0ed327da1677e53387b9564ea81b4b79022e8b) Thanks [@cxbAsDev](https://github.com/cxbAsDev)! - Update the minimum OpenClaw version documented in `docs/configuration.md` from `2026.5.22` to `2026.5.28`, matching `package.json` and the runtime compatibility checks. Added a regression test so the documentation cannot drift from the package metadata again.
+
+- [#1072](https://github.com/Martian-Engineering/lossless-claw/pull/1072) [`f272fab`](https://github.com/Martian-Engineering/lossless-claw/commit/f272fab91e49505dcefbd9f19fcc2f7ee070dec8) Thanks [@jalehman](https://github.com/jalehman)! - Avoid premature threshold compaction by treating raw messages outside the fresh tail as diagnostic and preparation data instead of adding them again to prompt pressure already represented by stored and observed token counts.
+
+- [#1058](https://github.com/Martian-Engineering/lossless-claw/pull/1058) [`3b6d7c6`](https://github.com/Martian-Engineering/lossless-claw/commit/3b6d7c658559c5d5715cbe53adf3e7e0201b196b) Thanks [@gorkem2020](https://github.com/gorkem2020)! - Recover ingestion after `/new` when the replacement transcript repeats
+  persisted content by correlating the host-minted reset archive and session
+  header timestamps. Transcripts without matching reset evidence continue to
+  fail closed.
+
+- [#1052](https://github.com/Martian-Engineering/lossless-claw/pull/1052) [`fa578d0`](https://github.com/Martian-Engineering/lossless-claw/commit/fa578d028c90bee4166603c83f2a7335b721e23e) Thanks [@octo-patch](https://github.com/octo-patch)! - Add MiniMax API-key support to standalone TUI summarization with global and China endpoints and `MiniMax-M3` model inference.
+
+- [#1076](https://github.com/Martian-Engineering/lossless-claw/pull/1076) [`8ab764c`](https://github.com/Martian-Engineering/lossless-claw/commit/8ab764c06c4294825db9b95c12833ec81d2f82f8) Thanks [@jalehman](https://github.com/jalehman)! - Bound the 0.x peer dependency to file-backed OpenClaw releases before 2026.7.2. SQLite-backed OpenClaw releases require Lossless Claw 1.0.
+
+- [#1030](https://github.com/Martian-Engineering/lossless-claw/pull/1030) [`f25e54b`](https://github.com/Martian-Engineering/lossless-claw/commit/f25e54bca7762c9588a76fd840bdc77e916a658e) Thanks [@cxbAsDev](https://github.com/cxbAsDev)! - Remove duplicate `largeFilesDir` declarations from `openclaw.plugin.json`. The surviving entries describe the default as relative to `OPENCLAW_STATE_DIR`, consistent with the runtime resolver and configuration reference. A regression test now guards against duplicate keys and stale default descriptions.
+
+- [#1057](https://github.com/Martian-Engineering/lossless-claw/pull/1057) [`8f65b00`](https://github.com/Martian-Engineering/lossless-claw/commit/8f65b00b0b0f7dc34b549c36266a974c4e9e2bec) Thanks [@gorkem2020](https://github.com/gorkem2020)! - Preserve completed trailing assistant replies in degraded context assembly when
+  OpenClaw supplies the current user prompt separately, while continuing to strip
+  blank assistant prefill tails.
+
+- [#1090](https://github.com/Martian-Engineering/lossless-claw/pull/1090) [`c28e21b`](https://github.com/Martian-Engineering/lossless-claw/commit/c28e21b46bba31cd61bfd737df48e4f5b9cc0aad) Thanks [@jalehman](https://github.com/jalehman)! - Preserve new `afterTurn` messages when an unaligned runtime batch only partially overlaps persisted history. Ambiguous mixed batches now ingest in full instead of repeatedly discarding genuine turns beside recurring control rows.
+
+- [#1090](https://github.com/Martian-Engineering/lossless-claw/pull/1090) [`c28e21b`](https://github.com/Martian-Engineering/lossless-claw/commit/c28e21b46bba31cd61bfd737df48e4f5b9cc0aad) Thanks [@jalehman](https://github.com/jalehman)! - Preserve distinct tool results when a model reuses tool-call IDs across turns. Only provider-minted IDs now participate in conversation-global event deduplication, and unexpected stable-key collisions retain the row without the conflicting key.
+
+- [#1053](https://github.com/Martian-Engineering/lossless-claw/pull/1053) [`9f5f5f5`](https://github.com/Martian-Engineering/lossless-claw/commit/9f5f5f54fc2d1880a3e728ab8533f83e31dee087) Thanks [@jetd1](https://github.com/jetd1)! - Preserve reasoning replay integrity for DB-assembled assistant messages.
+
+  Ingestion now records the assistant message's model identity
+  (`provider`/`api`/`model`/`responseModel`) in ordinal-0 part metadata, and
+  assembly re-attaches it so the host's model-bound thinking replay policy can
+  recognize same-model history instead of downgrading replayed thinking blocks
+  to plain text.
+
+  Assembly applies a three-way `thinkingSignature` gate:
+
+  1. **Sentinel `"reasoning_content"`** — the host's cross-provider reasoning-
+     native replay marker, not a provider-issued signature. Preserved only when
+     the assembled message carries stored model identity; dropped from legacy
+     rows without identity so the host's `transformMessages` doesn't downgrade
+     it to response-channel text (the contamination this patch fixes).
+
+  2. **Provider-issued signatures** — kept only when a stored model identity
+     survives to the assembled message (the host's `transformMessages` then
+     applies its own same-model replay policy). The identity gate is decided at
+     message level (identity lives on ordinal-0 metadata, but signature-bearing
+     blocks may sit at any ordinal).
+
+  3. **Legacy rows without identity** — keep the historical strip ([#365](https://github.com/Martian-Engineering/lossless-claw/issues/365)) for
+     provider-issued signatures; sentinel blocks are dropped entirely.
+
+  Comparison paths that treat part metadata as message identity
+  (`createLosslessMessageSignature`, `externalizedReplayMetadataMatches`) now
+  strip model-identity keys before comparing, so rows persisted before the
+  upgrade still match their post-upgrade live/assembled representations for
+  replay-prefix detection and live-coverage fork-anchor matching.
+
+- [#1073](https://github.com/Martian-Engineering/lossless-claw/pull/1073) [`8dff2f3`](https://github.com/Martian-Engineering/lossless-claw/commit/8dff2f33d7d9f2cc77dd5f05998c0443e9be22c7) Thanks [@jalehman](https://github.com/jalehman)! - Reopen the SQLite-backed context engine when OpenClaw starts a new gateway lifecycle from a cached plugin registry, preventing fallback to the legacy engine after in-process restarts.
+
+- [#1061](https://github.com/Martian-Engineering/lossless-claw/pull/1061) [`ccad297`](https://github.com/Martian-Engineering/lossless-claw/commit/ccad297f076eb29ae42b3a72a38c3a4a6c07bfe6) Thanks [@jjjhenriksen](https://github.com/jjjhenriksen)! - Use OpenClaw's supported `subagent.getSessionMessages()` runtime method when collecting delegated expansion replies, restoring `lcm_expand_query` compatibility with current OpenClaw beta releases.
+
+- [#1083](https://github.com/Martian-Engineering/lossless-claw/pull/1083) [`9fe9f6b`](https://github.com/Martian-Engineering/lossless-claw/commit/9fe9f6b71767331f0fdb6ba152d3188a889fb883) Thanks [@PollyBot13](https://github.com/PollyBot13)! - Skip restart and shutdown `session_end` hooks before acquiring the context engine, preventing closed-database errors after `gateway_stop`.
+
+- [#1044](https://github.com/Martian-Engineering/lossless-claw/pull/1044) [`8ac4720`](https://github.com/Martian-Engineering/lossless-claw/commit/8ac47205d2598c0875b5efde93cb836a15986439) Thanks [@bowenluo718](https://github.com/bowenluo718)! - Fix duplicate ingestion of the same message when the transcript is
+  redacted by `logging.redactPatterns` and the live `afterTurn` batch is
+  not. Stable assistant response and unambiguous tool-call identities are
+  persisted in a new `messages.stable_event_key` column, checked before
+  ingest side effects, and protected by a partial unique index. Messages
+  without an unambiguous stable identity retain the existing
+  content-based and redaction-aware deduplication behavior.
+
+- [#1042](https://github.com/Martian-Engineering/lossless-claw/pull/1042) [`4a19e16`](https://github.com/Martian-Engineering/lossless-claw/commit/4a19e160d107593ee30e7a2d4c74da7acc2a5d47) Thanks [@gorkem2020](https://github.com/gorkem2020)! - Require transcript provenance before untimestamped metadata-body matches can support covered-frontier replay alignment, while keeping unannounced recaps and heuristic matches fail-closed.
+
+## 0.15.1
+
+<!-- release-rollback-version: 0.15.0 -->
+
+### Patch Changes
+
+- [#1046](https://github.com/Martian-Engineering/lossless-claw/pull/1046) [`e7b69cf`](https://github.com/Martian-Engineering/lossless-claw/commit/e7b69cf0614f3c567503c084ce7ff5edca8907c1) Thanks [@steipete](https://github.com/steipete)! - Declare the OpenClaw host parameters accepted by the context engine and report the package version in engine metadata.
+
+- [#1002](https://github.com/Martian-Engineering/lossless-claw/pull/1002) [`8ead658`](https://github.com/Martian-Engineering/lossless-claw/commit/8ead658e536e99444586bbf78ceedcc0b6f16acf) Thanks [@mpz4life](https://github.com/mpz4life)! - Skip deferred compaction retry backoff in assemble emergency drain when token pressure exceeds budget. The emergency drain now passes `force: true` to `consumeDeferredCompactionDebt`, bypassing the `nextAttemptAfter` backoff check so compaction can retry immediately instead of waiting for the backoff timer. Normal deferred drain paths (`drainDeferredCompactionDebtIfIdle`, `maintain`) continue to respect backoff. To prevent infinite retries when compaction persistently fails, `force: true` is only applied when `retryAttempts < 3`.
+
+- [#1032](https://github.com/Martian-Engineering/lossless-claw/pull/1032) [`13cd6d3`](https://github.com/Martian-Engineering/lossless-claw/commit/13cd6d374e5014d893ce268886ab952392336be7) Thanks [@ralf003](https://github.com/ralf003)! - Fix an ingest-before-bootstrap race where a conversation with only
+  non-anchoring injected metadata rows could not establish a safe transcript
+  checkpoint when those rows did not overlap the JSONL transcript.
+
+  Without a checkpoint, every subsequent `afterTurn` reconcile classified the
+  conversation as `reason="checkpoint-missing"` with `allowNoAnchorImport=false`,
+  imported 0 messages, and skipped all persistence permanently. The conversation
+  froze at its pre-bootstrap message count while the JSONL transcript grew
+  unbounded.
+
+  The fix reuses the bounded non-anchoring-frontier proof from checkpoint-missing
+  recovery. Bootstrap imports the readable transcript before persisting its
+  checkpoint, then subsequent `afterTurn` calls resume normally. Conversations
+  with real divergent history or unreadable transcripts remain fail-closed so an
+  unrelated transcript cannot contaminate stored history.
+
+- [#1007](https://github.com/Martian-Engineering/lossless-claw/pull/1007) [`4a99705`](https://github.com/Martian-Engineering/lossless-claw/commit/4a99705a32e24ffd8b00dce2396ba74f1e2ee914) Thanks [@mpz4life](https://github.com/mpz4life)! - Prevent stale deferred-compaction token counts from forcing repeated emergency drains after the stored context has already been compacted.
+
+- [#1020](https://github.com/Martian-Engineering/lossless-claw/pull/1020) [`a4842c2`](https://github.com/Martian-Engineering/lossless-claw/commit/a4842c2319fafd9211b0420773dca45f7fd9117f) Thanks [@jalehman](https://github.com/jalehman)! - Match `/lossless doctor clean` cron and archived-subagent candidates under every configured OpenClaw agent id. The cleaner now compares exact agent and lane segments so unrelated or malformed session keys remain excluded from scan and apply.
+
+- [#1036](https://github.com/Martian-Engineering/lossless-claw/pull/1036) [`b33d9b7`](https://github.com/Martian-Engineering/lossless-claw/commit/b33d9b7f5810bc4cf4983928dbeaef3cc08c5eaf) Thanks [@gorkem2020](https://github.com/gorkem2020)! - See through plugin-injected context blocks on decorated channel turns.
+
+  Memory/context plugins prepend blocks like `<relevant-memories>` to the
+  model-facing body via `before_prompt_build`, at prompt-build time — strictly
+  after the bare transcript row is persisted, so persisted rows never carry
+  them. On decorated channels those blocks sit between the inbound metadata
+  prelude and the user body, which defeated both the same-turn body collapse and
+  the current-turn live-face recognition: the
+  memory-bearing live copy was neither collapsed onto its bare persisted row nor
+  re-appended after assembly, so the injected context silently vanished from the
+  outbound prompt. Anchored covered-frontier alignment now strips validated,
+  complete leading injected-context tag blocks (known tag names only), while
+  unanchored transcript adoption keeps user-authored tags verbatim. The
+  structural current-turn recognizer also accepts a metadata-decorated assembled
+  face whose extracted body exactly equals the live copy's extracted body (the
+  last assembled user row and recognized-marker gates are unchanged).
+
+  The line-form history recap matcher is now a linear line walker instead of a
+  composite backtracking regex. The old pattern went catastrophic (minutes of
+  event-loop blocking per call) on entry runs that fail the trailing terminator
+  check while containing per-line ambiguity, a shape real group-chat recaps
+  produce and which the reduction above newly exposes to routine traffic.
+  Semantics are unchanged and pinned by tests, including the all-or-nothing
+  fail-closed rejection of an unterminated run.
+
+- [#1018](https://github.com/Martian-Engineering/lossless-claw/pull/1018) [`0068006`](https://github.com/Martian-Engineering/lossless-claw/commit/0068006a74510889d898e1b4c14649e9eb02af78) Thanks [@jalehman](https://github.com/jalehman)! - Keep OpenClaw's preemptive overflow check enabled when deferred compaction debt forces Lossless Claw to return degraded live context.
+
+- [#1014](https://github.com/Martian-Engineering/lossless-claw/pull/1014) [`9af0795`](https://github.com/Martian-Engineering/lossless-claw/commit/9af07952cc874d0d30db157c33c9769c7e937c30) Thanks [@mpz4life](https://github.com/mpz4life)! - Avoid unnecessary after-turn compaction when OpenClaw does not provide a live prompt token count by evaluating the stored context without double-counting its raw prefix.
+
+- [#1011](https://github.com/Martian-Engineering/lossless-claw/pull/1011) [`224c267`](https://github.com/Martian-Engineering/lossless-claw/commit/224c26726a4d9318e1eb00ecbdedcf0e189f7126) Thanks [@mpz4life](https://github.com/mpz4life)! - Skip leaf compaction when selected raw messages are missing or contain no meaningful content, preventing zero-source fallback summaries and context growth. Full sweeps continue past empty-source chunks, clamp tracked token deltas at zero, and stop leaf passes once `stopAtTokens` is reached.
+
+- [#1026](https://github.com/Martian-Engineering/lossless-claw/pull/1026) [`80602dc`](https://github.com/Martian-Engineering/lossless-claw/commit/80602dc28b2ba1a9fbc5c45d7e4122fe9736edcb) Thanks [@ArthurNie](https://github.com/ArthurNie)! - Carry each message's role into the leaf-summary source text.
+
+  `CompactionEngine` dropped `role` when assembling the summarizer input, so a tool
+  result quoting another conversation was byte-identical to an operator instruction.
+  A summarizer reading that input can promote quoted material to current intent — the
+  summary then enters context as user-role text and the model follows it as the active
+  task. The header line now reads `[<timestamp> | <role>]`; message bodies are
+  unchanged and no schema migration is required.
+
+- [#1000](https://github.com/Martian-Engineering/lossless-claw/pull/1000) [`d3acd24`](https://github.com/Martian-Engineering/lossless-claw/commit/d3acd247024c48cf2cad8d33eb248d7f1cffc4ee) Thanks [@ralf003](https://github.com/ralf003)! - Avoid duplicate runtime rows with already-persisted transcript identities when a tracked transcript is temporarily unavailable, while preserving ambiguous rows that the unavailable transcript cannot recover.
+
+- [#1019](https://github.com/Martian-Engineering/lossless-claw/pull/1019) [`2dbf925`](https://github.com/Martian-Engineering/lossless-claw/commit/2dbf92500f6353c66a5f56780e51001a718bee01) Thanks [@jalehman](https://github.com/jalehman)! - Keep the newest user message and its following assistant/tool suffix together when fresh-tail count or token caps would otherwise split the active turn.
+
+- [#1029](https://github.com/Martian-Engineering/lossless-claw/pull/1029) [`4fd1132`](https://github.com/Martian-Engineering/lossless-claw/commit/4fd1132917fc12b3005a057c7e5323a82c385b5e) Thanks [@cxbAsDev](https://github.com/cxbAsDev)! - Correct the documented default for `LCM_LEAF_TARGET_TOKENS` in the README environment-variable table from `1200` to `2400`, matching the runtime default in `src/db/config.ts` and the configuration reference.
+
+- [#1043](https://github.com/Martian-Engineering/lossless-claw/pull/1043) [`d411af0`](https://github.com/Martian-Engineering/lossless-claw/commit/d411af02327c32d49dc9309b773b7a4272616214) Thanks [@gorkem2020](https://github.com/gorkem2020)! - Prevent repeated same-body recovery turns from replaying duplicate bare transcript rows by adopting the oldest matching decorated runtime row during transcript reconciliation.
+
+- [#1012](https://github.com/Martian-Engineering/lossless-claw/pull/1012) [`5950a4a`](https://github.com/Martian-Engineering/lossless-claw/commit/5950a4ae73c9fe775ad851e41ea7d1c0a32b0f06) Thanks [@mpz4life](https://github.com/mpz4life)! - Respect `OPENCLAW_STATE_DIR` in all code paths. The `tui`, `stub-tier-live-watcher`, and `stub-tier-assemble-bench` scripts now honor the `OPENCLAW_STATE_DIR` environment variable instead of hardcoding `~/.openclaw`. A `resolveOpenclawStateDir` helper was extracted for `tui/data.go` matching the existing pattern in `src/db/config.ts`.
+
+- [#1021](https://github.com/Martian-Engineering/lossless-claw/pull/1021) [`5640c28`](https://github.com/Martian-Engineering/lossless-claw/commit/5640c28db450054b60aacd78b99a83170c80be58) Thanks [@ArthurNie](https://github.com/ArthurNie)! - Add the `lcm-control` OpenClaw session action so authorized operators can invoke Lossless Claw control operations through the host session-action API.
+
+- [#1041](https://github.com/Martian-Engineering/lossless-claw/pull/1041) [`f67bb32`](https://github.com/Martian-Engineering/lossless-claw/commit/f67bb3232c9d668744b13323f71b7a8d4a22dfaf) Thanks [@gorkem2020](https://github.com/gorkem2020)! - Deferred maintenance drains no longer honour a persisted context-threshold override that current config can no longer produce: the persisted value is kept only while a plausibly-matching override rule still carries the same threshold and recorded sizing, and a persisted global threshold that diverges from the configured global is superseded, so stale rows from removed or reverted threshold experiments cannot wedge compaction.
+
+## 0.15.0
+
+<!-- release-rollback-version: 0.14.0 -->
+
+### Minor Changes
+
+- [#981](https://github.com/Martian-Engineering/lossless-claw/pull/981) [`189efba`](https://github.com/Martian-Engineering/lossless-claw/commit/189efbaf792cd93ee10579747168ff0f75b2511a) Thanks [@cxbAsDev](https://github.com/cxbAsDev)! - `/lossless doctor apply` can now repair a specific conversation with `doctor apply <conversation-id> confirm-offline`. Targeted repair is limited to authorized OpenClaw command senders and requires the explicit offline confirmation after the target's active channel path is isolated. The existing current-conversation behavior is unchanged when no id is provided.
+
+### Patch Changes
+
+- [#979](https://github.com/Martian-Engineering/lossless-claw/pull/979) [`dffba95`](https://github.com/Martian-Engineering/lossless-claw/commit/dffba9511a9567e9cf8dc22fae23b06bf983a964) Thanks [@cxbAsDev](https://github.com/cxbAsDev)! - `lcm_describe` now accepts full copied reference strings such as `[LCM Tool Output: file_xxx | ...]` and `[LCM File: file_xxx | ...]` as `id`, extracting the embedded `file_xxx` or `sum_xxx` ID automatically. Bare IDs continue to work; ambiguous input (multiple IDs), zero/empty IDs, and malformed IDs now return clear errors.
+
+- [#935](https://github.com/Martian-Engineering/lossless-claw/pull/935) [`2b84753`](https://github.com/Martian-Engineering/lossless-claw/commit/2b847535747838c3f2ba29e7a268cfc7f4e7ccf5) Thanks [@gorkem2020](https://github.com/gorkem2020)! - Preserve conversation continuity when never-ingested recovery encounters an exact metadata-decorated runtime copy of a bare transcript row.
+
+- [#991](https://github.com/Martian-Engineering/lossless-claw/pull/991) [`1b12e4b`](https://github.com/Martian-Engineering/lossless-claw/commit/1b12e4beca9e3e23e3405ee5413dd801d398c247) Thanks [@gorkem2020](https://github.com/gorkem2020)! - Fix the ambiguous-rollover identity-scope wedge on rapid same-day /new resets. `messageIdentity` compares role+content only, unscoped by session generation, so a lane whose first post-reset turn happened to repeat trivial content (e.g. a literal "ping" health check) collided with the prior generation's persisted history and the freshness gate froze the lane instead of rotating it, re-warning on every subsequent bootstrap/afterTurn call. Identity overlap on trivial, low-entropy content no longer blocks rotation when the rollover is independently proven deliberate (a durable /new marker plus its archive sibling); substantial overlapping content still fails closed exactly as before, so a foreign session reusing a stale sessionKey is still rejected. A genuine freeze now warns once per session generation instead of on every turn. The once-only memo is capped (FIFO-evicted past 500 distinct generations) so a long-lived host process doesn't accumulate it indefinitely; a generation whose entry is evicted may warn once more on its next occurrence.
+
+- [#996](https://github.com/Martian-Engineering/lossless-claw/pull/996) [`c4a69c7`](https://github.com/Martian-Engineering/lossless-claw/commit/c4a69c7c7add4bd15da447e9c5264821cd5b11d0) Thanks [@Kaspnov](https://github.com/Kaspnov)! - Add an opt-in `hostFallbackMode: "capture-only"` setting so generic CLI backends can persist turns and use recall tools without Lossless prompt assembly or host-triggered Lossless compaction. Strict full-lifecycle validation remains the default, backend-native compaction remains host-owned, and subagent projection requirements remain unchanged.
+
+- [#830](https://github.com/Martian-Engineering/lossless-claw/pull/830) [`bc261ec`](https://github.com/Martian-Engineering/lossless-claw/commit/bc261ec2441261d1a7d9199600a8e86a4e7957e0) Thanks [@mpz4life](https://github.com/mpz4life)! - Prevent duplicate tool-call replay ingestion when OpenClaw stores a host-redacted form of sensitive message content.
+
+- [#808](https://github.com/Martian-Engineering/lossless-claw/pull/808) [`be366bd`](https://github.com/Martian-Engineering/lossless-claw/commit/be366bda3c10e4094567a2dccb9bbb9478e6f27b) Thanks [@holgergruenhagen](https://github.com/holgergruenhagen)! - Tolerate and cap oversized CLI summary output instead of failing historical backfill.
+
+- [#939](https://github.com/Martian-Engineering/lossless-claw/pull/939) [`763ad06`](https://github.com/Martian-Engineering/lossless-claw/commit/763ad06d3ce92331f265a5e0c0adfc6563e1adc4) Thanks [@gorkem2020](https://github.com/gorkem2020)! - Recognize the specific OpenClaw runtime/transcript whitespace divergence, where core collapses runs of spaces in the runtime message to a single space while the transcript persists them verbatim, as one user turn during afterTurn frontier-coverage. This prevents a store double-write of the same turn without collapsing newlines, tabs, or leading and trailing whitespace, so two turns that differ in meaningful whitespace (line breaks or tab indentation) are never merged. Storage stays byte-verbatim; the persisted row is the survivor.
+
+## 0.14.0
+
+<!-- release-rollback-version: 0.13.2 -->
+
+Lossless Claw 0.14.0 adds a packaged diagnostics CLI and combines the
+continuity, reconciliation, doctor, recall, and compaction fixes released
+since `0.13.2`.
+
+### Highlights
+
+- Inspect conversations, messages, summaries, effective configuration, and
+  fresh-tail state through the packaged `lcm` CLI.
+- Preserve more live and recovered context across resets, rollovers, replayed
+  entries, metadata-wrapped turns, truncated reads, and MCP result envelopes.
+- Improve operational safety with scoped-repair backups, version-split
+  detection, bounded delegated recall, and quieter healthy-path telemetry.
+
+### Minor Changes
+
+- [#983](https://github.com/Martian-Engineering/lossless-claw/pull/983) [`367df4e`](https://github.com/Martian-Engineering/lossless-claw/commit/367df4ec10bbaa9065204340d41a33ffdf1fabba) Thanks [@jalehman](https://github.com/jalehman)! - Add the TypeScript `lcm` executable for paginated read-only conversation diagnostics, message and fresh-tail inspection, depth- and time-filtered summary inspection, effective config viewing, and manifest-validated targeted config edits.
+
+### Patch Changes
+
+- [#958](https://github.com/Martian-Engineering/lossless-claw/pull/958) [`5442e8e`](https://github.com/Martian-Engineering/lossless-claw/commit/5442e8e3f68169530a7543f9a777fe495c63ad4e) Thanks [@mpz4life](https://github.com/mpz4life)! - Fix `doctor-contract` model reference generation to honor the explicit `provider` field in `fallbackProviders` when the model value also contains a slash, preventing false "Missing allowedModels entries" override-policy warnings.
+
+- [#994](https://github.com/Martian-Engineering/lossless-claw/pull/994) [`669e01d`](https://github.com/Martian-Engineering/lossless-claw/commit/669e01d8b07ae1d82c109b624c8362c99420b7d7) Thanks [@jalehman](https://github.com/jalehman)! - Bound each delegated recall request by one deadline, cancel timed-out child work through host-owned session cleanup, preserve completed cross-conversation evidence, and return structured failure diagnostics.
+
+- [#947](https://github.com/Martian-Engineering/lossless-claw/pull/947) [`70805c1`](https://github.com/Martian-Engineering/lossless-claw/commit/70805c1a1e698ba127b31966b64148ad896ea927) Thanks [@ralf003](https://github.com/ralf003)! - Allow isolated cron sessions with a matching durable sessionKey to recover from a checkpoint-missing reconciliation state even when the conversation's sessionId has been overwritten by a newer cron run.
+
+- [#960](https://github.com/Martian-Engineering/lossless-claw/pull/960) [`6dcc525`](https://github.com/Martian-Engineering/lossless-claw/commit/6dcc525ee15f71d7277a8c77a9f278617c74dfa6) Thanks [@gorkem2020](https://github.com/gorkem2020)! - Demote the per-assemble "appended fork-bounded live suffix" log from warn to debug on the healthy path. Thread-fork sessions append this suffix on essentially every assemble, so the line was warn-level noise in routine operation. The log stays at warn when the append evicted messages or ran over budget, the states that need operator attention. Assembly behavior is unchanged; only the log level moves.
+
+- [#957](https://github.com/Martian-Engineering/lossless-claw/pull/957) [`2b89cdf`](https://github.com/Martian-Engineering/lossless-claw/commit/2b89cdf635a8b18dd5de58d79ad9a51b3d08e0c9) Thanks [@gorkem2020](https://github.com/gorkem2020)! - Stop the rollover-split doctor from auto-restoring conversations a user deliberately wiped with `/reset`. A new nullable `archive_cause` column records why each conversation was archived, written at the single archive funnel for both the `before_reset` and `session_end` lifecycle events a `/reset` surfaces. The doctor excludes deliberate causes (`manual-reset`) from its merge sources, so a `/reset` archive is never re-merged into the active conversation. Incidental archives (`rollover-fallback`, `cron-rotation`, `session-end`, idle/daily/compaction) and legacy NULL-cause rows stay merge-eligible, so genuine crash and rollover splits are still recovered.
+
+- [#990](https://github.com/Martian-Engineering/lossless-claw/pull/990) [`b89e192`](https://github.com/Martian-Engineering/lossless-claw/commit/b89e1920643c3c9f4c146b856f940db4f4522928) Thanks [@jalehman](https://github.com/jalehman)! - Report the active Lossless Claw version and source path in doctor output, and warn when live or generated OpenClaw package copies use a different version.
+
+- [#989](https://github.com/Martian-Engineering/lossless-claw/pull/989) [`c16c2ef`](https://github.com/Martian-Engineering/lossless-claw/commit/c16c2effbf046b805996a6d2a5ba93b9ecd9bf60) Thanks [@jalehman](https://github.com/jalehman)! - Prefer the active runtime session when a stale tool session key points scoped `lcm_*` recall at another conversation family.
+
+- [#959](https://github.com/Martian-Engineering/lossless-claw/pull/959) [`992bf00`](https://github.com/Martian-Engineering/lossless-claw/commit/992bf002f5b6f0a9e037ec43711e1b50d9346795) Thanks [@spiral-cmd](https://github.com/spiral-cmd)! - Delegate ignored-session compaction to OpenClaw's runtime compaction path when the host exposes it, so sessions excluded from LCM can still recover from raw transcript pressure.
+
+- [#993](https://github.com/Martian-Engineering/lossless-claw/pull/993) [`27cda30`](https://github.com/Martian-Engineering/lossless-claw/commit/27cda302a545b97d5974fa8336c0d8c891437a14) Thanks [@jalehman](https://github.com/jalehman)! - Preserve real tool results when compacted history displaces them past later tool calls or an earlier synthetic repair result.
+
+- [#972](https://github.com/Martian-Engineering/lossless-claw/pull/972) [`1a89b30`](https://github.com/Martian-Engineering/lossless-claw/commit/1a89b30a669ae8cf648bc7ad4e67307ea01bf740) Thanks [@gorkem2020](https://github.com/gorkem2020)! - Preserve the conversation on a /new soft reset. The host archives the old transcript by renaming it to `${file}.reset.<ts>` and mints a fresh session id, so the next-turn rollover detector saw a stale session key whose tracked transcript had vanished and destructively archived the pruned conversation, stranding the retained summary band it was documented to carry forward. Lossless now records its own durable /new prune marker, requires that marker plus the reset archive sibling before standing down the destructive guard, keeps foreign reused-key identity-overlap cases at warn, and rebinds once the first turn of the new session lands.
+
+- [#954](https://github.com/Martian-Engineering/lossless-claw/pull/954) [`0b8e2b2`](https://github.com/Martian-Engineering/lossless-claw/commit/0b8e2b29b99de15bc1541d226adb77ac02f168ff) Thanks [@gorkem2020](https://github.com/gorkem2020)! - Demote the happy-path ambiguous session-key rollover recovery logs from warn to info or debug, context-aware. The successful fresh-transcript rebind and transient not-provably-fresh decisions now log at info; the assemble pass's per-phase preserve restatement logs at debug; the fresh-rebind new-epoch import logs at info, and the afterTurn "frontier not covered" line logs at debug only on the benign ambiguous-rollover path.
+
+  The bootstrap and afterTurn preserve log keys off the freshness disposition carried out of the rebind attempt: a transient or unjudgeable verdict (no usable timestamps, delivery-only traffic, nothing comparable) is a pending state the next turn re-evaluates and logs at debug, while a conflicting verdict (identity overlap, or candidate entries predating persistence) is a genuine freeze and stays at warn. The rebind-failed and freshness-check exception paths, the no-anchor import-cap aborts, and every non-rollover unsafe-to-advance frontier skip also stay at warn. The freeze and no-merge protection is unchanged throughout; only log levels move.
+
+- [#951](https://github.com/Martian-Engineering/lossless-claw/pull/951) [`0bfb7e9`](https://github.com/Martian-Engineering/lossless-claw/commit/0bfb7e9bf686717da593feb4a8ce77b7711c0754) Thanks [@SYU8384](https://github.com/SYU8384)! - Document the optional programmatic status/doctor/rotate control surface and keep status free of non-durable rotation timestamps.
+
+- [#956](https://github.com/Martian-Engineering/lossless-claw/pull/956) [`f18ccd4`](https://github.com/Martian-Engineering/lossless-claw/commit/f18ccd42bc8feaa538c599b5e90b3b6ef5a63104) Thanks [@jalehman](https://github.com/jalehman)! - Allow context-threshold override rules to set model-specific fresh-tail and leaf chunk sizing for assembly and threshold compaction.
+
+- [#984](https://github.com/Martian-Engineering/lossless-claw/pull/984) [`e4a36d7`](https://github.com/Martian-Engineering/lossless-claw/commit/e4a36d7a71c55ee5f3f91c055fe6c1f5ab509048) Thanks [@jalehman](https://github.com/jalehman)! - Preserve MCP tool-result text nested inside OpenClaw result envelopes when preparing conversation summaries.
+
+- [#950](https://github.com/Martian-Engineering/lossless-claw/pull/950) [`9561470`](https://github.com/Martian-Engineering/lossless-claw/commit/9561470f911509496ccf11de969349fbad31ca7d) Thanks [@mpz4life](https://github.com/mpz4life)! - When OpenClaw's built-in `read` tool returns truncated output, recover the full file content before externalizing the oversized tool result — but only for the live `assemble()` current turn. The truncated text is preserved on ingest, bootstrap, and replay paths so transcript fidelity is not compromised by current disk state. Fallback to the truncated fragment when the original path is missing, relative, unreadable, non-regular, or too large for bounded live recovery.
+
+- [#953](https://github.com/Martian-Engineering/lossless-claw/pull/953) [`7e0cff2`](https://github.com/Martian-Engineering/lossless-claw/commit/7e0cff2f5fd177130c9db8c65dc943205e4fa35c) Thanks [@cxbAsDev](https://github.com/cxbAsDev)! - Avoid requesting summary-thinking controls for Ollama summarizer calls, so extended-thinking models return usable text summaries without promoting typed reasoning blocks into persisted summary content.
+
+- [#978](https://github.com/Martian-Engineering/lossless-claw/pull/978) [`013de1f`](https://github.com/Martian-Engineering/lossless-claw/commit/013de1f1b0592eb97139c9387790daafdcb2653c) Thanks [@gorkem2020](https://github.com/gorkem2020)! - Recognize memory-first current turns in live coverage. When a memory or context plugin decorates the current turn with injected-context markers (for example `relevant-memories`, `relevant_memories`, `hindsight_memories`, or `active_memory_plugin`) and the channel adds no timestamp, the decorated current turn was previously dropped from live assembly and the model saw only the tag-stripped stored row. It is now re-appended so the decorated current turn is preserved. Because marker presence alone is not provenance proof, marker-based recognition is constrained to the last assembled user row (the current turn's persisted face), so a distinct turn that merely ends with an earlier row's body cannot be matched through a typed marker.
+
+- [#968](https://github.com/Martian-Engineering/lossless-claw/pull/968) [`3e05747`](https://github.com/Martian-Engineering/lossless-claw/commit/3e057473dbd1c6b4badfb6c040ff5e61f2299820) Thanks [@gorkem2020](https://github.com/gorkem2020)! - Skip replayed transcript entries that OpenClaw re-appends under fresh entry ids when the persisted row and new entry share the same canonical identity and full-precision inner source timestamp.
+
+- [#967](https://github.com/Martian-Engineering/lossless-claw/pull/967) [`8664c6e`](https://github.com/Martian-Engineering/lossless-claw/commit/8664c6ea674c37f766da900d3b78a01ed841a88c) Thanks [@gorkem2020](https://github.com/gorkem2020)! - Collapse metadata-wrapped OpenClaw runtime copies onto their bare persisted rows only when the covered transcript frontier proves same-turn alignment. Degraded after-turn dedup remains timestamp-gated, so repeated short user messages wrapped in forgeable metadata-shaped text are preserved instead of silently collapsed.
+
+- [#970](https://github.com/Martian-Engineering/lossless-claw/pull/970) [`004e266`](https://github.com/Martian-Engineering/lossless-claw/commit/004e266410a3f638e600fd047f04b56ae001825b) Thanks [@gorkem2020](https://github.com/gorkem2020)! - Create and report a SQLite backup before scoped doctor summary repair writes, matching the backup-first safety behavior used by rollover-split repair.
+
+- [#974](https://github.com/Martian-Engineering/lossless-claw/pull/974) [`421e7cb`](https://github.com/Martian-Engineering/lossless-claw/commit/421e7cb0606600991edc2feec4b85b22487a974a) Thanks [@gorkem2020](https://github.com/gorkem2020)! - Strip a structurally validated host chat-history recap block when reducing an OpenClaw inbound turn to its model-facing body, and when canonicalizing it for identity hashing. Building on the metadata-block strip landed in [#967](https://github.com/Martian-Engineering/lossless-claw/pull/967), a decorated inbound turn that also carries a recap of unread channel messages previously kept the recap embedded in its reduced body, so it never matched its bare persisted row and both got replayed to the model (see [#973](https://github.com/Martian-Engineering/lossless-claw/issues/973)).
+
+  The matcher recognizes the two recap headings OpenClaw core emits ("Chat history since last reply (untrusted, for context):" and "Conversation context (untrusted, chronological, selected for current message):", kept in a single extensible list) across both observed body grammars: the JSON-fenced message array and the older per-message prose line format. It also consumes the exact host JSON context blocks OpenClaw can emit between metadata and recap, such as reply target, thread starter, forwarded-message, and location context. Each combination is validated fail-closed: the strip requires a positive host `history_count`, an exact known heading, and a body that parses under the expected grammar, so user-authored recap-shaped text, a quoted heading, or a malformed payload is left untouched.
+
+  The identity canonicalization also excludes the host's volatile recap count, media count, and truncation fields whenever trusted history is present. On upgrade, the versioned OpenClaw identity repair refreshes message and bootstrap hashes that were already canonicalized before recap removal, preventing stale identity state from re-importing those rows.
+
+- [#977](https://github.com/Martian-Engineering/lossless-claw/pull/977) [`c71af2a`](https://github.com/Martian-Engineering/lossless-claw/commit/c71af2ae0723c4e5208a25fb47c58add39acf9b8) Thanks [@ryanngit](https://github.com/ryanngit)! - Document optional storage exclusions for OpenClaw active-memory and memory-core dreaming narrative sessions, including the breadth and data-retention implications of the recommended patterns.
+
+- [#945](https://github.com/Martian-Engineering/lossless-claw/pull/945) [`093ac5b`](https://github.com/Martian-Engineering/lossless-claw/commit/093ac5ba2db88eb4339cb97bf0d641773b4888db) Thanks [@mpz4life](https://github.com/mpz4life)! - Teach `lcm_grep` to search the first 512,000 bytes of externalized `large_files` text rows via the new `scope="files"` option. Add an optional `fileIds` parameter to restrict the search to specific file IDs. Each match reports the file ID, line number, byte offset, matched text, and a contextual snippet. Update `lcm_describe` to give accurate bounded-search guidance when inlined content is truncated. Honor `allConversations=true` for `scope="files"` by searching large files across all conversations.
+
+## 0.14.0-beta.0
+
+<!-- release-rollback-version: 0.13.2 -->
+
+This beta opens the next Lossless Claw release line for broader testing. It
+adds a packaged diagnostics CLI and combines the continuity, reconciliation,
+doctor, recall, and compaction fixes merged since `0.13.2`.
+
+### Highlights
+
+- Inspect conversations, messages, summaries, effective configuration, and
+  fresh-tail state through the new packaged `lcm` CLI.
+- Preserve more live and recovered context across resets, rollovers, replayed
+  entries, metadata-wrapped turns, truncated reads, and MCP result envelopes.
+- Improve operational safety with scoped-repair backups, version-split
+  detection, bounded delegated recall, and quieter healthy-path telemetry.
+
+### Known Boundaries
+
+- This is a prerelease testing build, not a stable-channel promotion.
+- Install with `npm install @martian-engineering/lossless-claw@beta`; existing
+  stable users remain on npm's `latest` channel.
+- Runtime and customer-specific canary results remain separate from package,
+  tag, and GitHub Release verification.
+
+### Minor Changes
+
+- [#983](https://github.com/Martian-Engineering/lossless-claw/pull/983) [`367df4e`](https://github.com/Martian-Engineering/lossless-claw/commit/367df4ec10bbaa9065204340d41a33ffdf1fabba) Thanks [@jalehman](https://github.com/jalehman)! - Add the TypeScript `lcm` executable for paginated read-only conversation diagnostics, message and fresh-tail inspection, depth- and time-filtered summary inspection, effective config viewing, and manifest-validated targeted config edits.
+
+### Patch Changes
+
+- [#958](https://github.com/Martian-Engineering/lossless-claw/pull/958) [`5442e8e`](https://github.com/Martian-Engineering/lossless-claw/commit/5442e8e3f68169530a7543f9a777fe495c63ad4e) Thanks [@mpz4life](https://github.com/mpz4life)! - Fix `doctor-contract` model reference generation to honor the explicit `provider` field in `fallbackProviders` when the model value also contains a slash, preventing false "Missing allowedModels entries" override-policy warnings.
+
+- [#994](https://github.com/Martian-Engineering/lossless-claw/pull/994) [`669e01d`](https://github.com/Martian-Engineering/lossless-claw/commit/669e01d8b07ae1d82c109b624c8362c99420b7d7) Thanks [@jalehman](https://github.com/jalehman)! - Bound each delegated recall request by one deadline, cancel timed-out child work through host-owned session cleanup, preserve completed cross-conversation evidence, and return structured failure diagnostics.
+
+- [#947](https://github.com/Martian-Engineering/lossless-claw/pull/947) [`70805c1`](https://github.com/Martian-Engineering/lossless-claw/commit/70805c1a1e698ba127b31966b64148ad896ea927) Thanks [@ralf003](https://github.com/ralf003)! - Allow isolated cron sessions with a matching durable sessionKey to recover from a checkpoint-missing reconciliation state even when the conversation's sessionId has been overwritten by a newer cron run.
+
+- [#960](https://github.com/Martian-Engineering/lossless-claw/pull/960) [`6dcc525`](https://github.com/Martian-Engineering/lossless-claw/commit/6dcc525ee15f71d7277a8c77a9f278617c74dfa6) Thanks [@gorkem2020](https://github.com/gorkem2020)! - Demote the per-assemble "appended fork-bounded live suffix" log from warn to debug on the healthy path. Thread-fork sessions append this suffix on essentially every assemble, so the line was warn-level noise in routine operation. The log stays at warn when the append evicted messages or ran over budget, the states that need operator attention. Assembly behavior is unchanged; only the log level moves.
+
+- [#957](https://github.com/Martian-Engineering/lossless-claw/pull/957) [`2b89cdf`](https://github.com/Martian-Engineering/lossless-claw/commit/2b89cdf635a8b18dd5de58d79ad9a51b3d08e0c9) Thanks [@gorkem2020](https://github.com/gorkem2020)! - Stop the rollover-split doctor from auto-restoring conversations a user deliberately wiped with `/reset`. A new nullable `archive_cause` column records why each conversation was archived, written at the single archive funnel for both the `before_reset` and `session_end` lifecycle events a `/reset` surfaces. The doctor excludes deliberate causes (`manual-reset`) from its merge sources, so a `/reset` archive is never re-merged into the active conversation. Incidental archives (`rollover-fallback`, `cron-rotation`, `session-end`, idle/daily/compaction) and legacy NULL-cause rows stay merge-eligible, so genuine crash and rollover splits are still recovered.
+
+- [#990](https://github.com/Martian-Engineering/lossless-claw/pull/990) [`b89e192`](https://github.com/Martian-Engineering/lossless-claw/commit/b89e1920643c3c9f4c146b856f940db4f4522928) Thanks [@jalehman](https://github.com/jalehman)! - Report the active Lossless Claw version and source path in doctor output, and warn when live or generated OpenClaw package copies use a different version.
+
+- [#989](https://github.com/Martian-Engineering/lossless-claw/pull/989) [`c16c2ef`](https://github.com/Martian-Engineering/lossless-claw/commit/c16c2effbf046b805996a6d2a5ba93b9ecd9bf60) Thanks [@jalehman](https://github.com/jalehman)! - Prefer the active runtime session when a stale tool session key points scoped `lcm_*` recall at another conversation family.
+
+- [#959](https://github.com/Martian-Engineering/lossless-claw/pull/959) [`992bf00`](https://github.com/Martian-Engineering/lossless-claw/commit/992bf002f5b6f0a9e037ec43711e1b50d9346795) Thanks [@spiral-cmd](https://github.com/spiral-cmd)! - Delegate ignored-session compaction to OpenClaw's runtime compaction path when the host exposes it, so sessions excluded from LCM can still recover from raw transcript pressure.
+
+- [#993](https://github.com/Martian-Engineering/lossless-claw/pull/993) [`27cda30`](https://github.com/Martian-Engineering/lossless-claw/commit/27cda302a545b97d5974fa8336c0d8c891437a14) Thanks [@jalehman](https://github.com/jalehman)! - Preserve real tool results when compacted history displaces them past later tool calls or an earlier synthetic repair result.
+
+- [#972](https://github.com/Martian-Engineering/lossless-claw/pull/972) [`1a89b30`](https://github.com/Martian-Engineering/lossless-claw/commit/1a89b30a669ae8cf648bc7ad4e67307ea01bf740) Thanks [@gorkem2020](https://github.com/gorkem2020)! - Preserve the conversation on a /new soft reset. The host archives the old transcript by renaming it to `${file}.reset.<ts>` and mints a fresh session id, so the next-turn rollover detector saw a stale session key whose tracked transcript had vanished and destructively archived the pruned conversation, stranding the retained summary band it was documented to carry forward. Lossless now records its own durable /new prune marker, requires that marker plus the reset archive sibling before standing down the destructive guard, keeps foreign reused-key identity-overlap cases at warn, and rebinds once the first turn of the new session lands.
+
+- [#954](https://github.com/Martian-Engineering/lossless-claw/pull/954) [`0b8e2b2`](https://github.com/Martian-Engineering/lossless-claw/commit/0b8e2b29b99de15bc1541d226adb77ac02f168ff) Thanks [@gorkem2020](https://github.com/gorkem2020)! - Demote the happy-path ambiguous session-key rollover recovery logs from warn to info or debug, context-aware. The successful fresh-transcript rebind and transient not-provably-fresh decisions now log at info; the assemble pass's per-phase preserve restatement logs at debug; the fresh-rebind new-epoch import logs at info, and the afterTurn "frontier not covered" line logs at debug only on the benign ambiguous-rollover path.
+
+  The bootstrap and afterTurn preserve log keys off the freshness disposition carried out of the rebind attempt: a transient or unjudgeable verdict (no usable timestamps, delivery-only traffic, nothing comparable) is a pending state the next turn re-evaluates and logs at debug, while a conflicting verdict (identity overlap, or candidate entries predating persistence) is a genuine freeze and stays at warn. The rebind-failed and freshness-check exception paths, the no-anchor import-cap aborts, and every non-rollover unsafe-to-advance frontier skip also stay at warn. The freeze and no-merge protection is unchanged throughout; only log levels move.
+
+- [#951](https://github.com/Martian-Engineering/lossless-claw/pull/951) [`0bfb7e9`](https://github.com/Martian-Engineering/lossless-claw/commit/0bfb7e9bf686717da593feb4a8ce77b7711c0754) Thanks [@SYU8384](https://github.com/SYU8384)! - Document the optional programmatic status/doctor/rotate control surface and keep status free of non-durable rotation timestamps.
+
+- [#956](https://github.com/Martian-Engineering/lossless-claw/pull/956) [`f18ccd4`](https://github.com/Martian-Engineering/lossless-claw/commit/f18ccd42bc8feaa538c599b5e90b3b6ef5a63104) Thanks [@jalehman](https://github.com/jalehman)! - Allow context-threshold override rules to set model-specific fresh-tail and leaf chunk sizing for assembly and threshold compaction.
+
+- [#984](https://github.com/Martian-Engineering/lossless-claw/pull/984) [`e4a36d7`](https://github.com/Martian-Engineering/lossless-claw/commit/e4a36d7a71c55ee5f3f91c055fe6c1f5ab509048) Thanks [@jalehman](https://github.com/jalehman)! - Preserve MCP tool-result text nested inside OpenClaw result envelopes when preparing conversation summaries.
+
+- [#950](https://github.com/Martian-Engineering/lossless-claw/pull/950) [`9561470`](https://github.com/Martian-Engineering/lossless-claw/commit/9561470f911509496ccf11de969349fbad31ca7d) Thanks [@mpz4life](https://github.com/mpz4life)! - When OpenClaw's built-in `read` tool returns truncated output, recover the full file content before externalizing the oversized tool result — but only for the live `assemble()` current turn. The truncated text is preserved on ingest, bootstrap, and replay paths so transcript fidelity is not compromised by current disk state. Fallback to the truncated fragment when the original path is missing, relative, unreadable, non-regular, or too large for bounded live recovery.
+
+- [#953](https://github.com/Martian-Engineering/lossless-claw/pull/953) [`7e0cff2`](https://github.com/Martian-Engineering/lossless-claw/commit/7e0cff2f5fd177130c9db8c65dc943205e4fa35c) Thanks [@cxbAsDev](https://github.com/cxbAsDev)! - Avoid requesting summary-thinking controls for Ollama summarizer calls, so extended-thinking models return usable text summaries without promoting typed reasoning blocks into persisted summary content.
+
+- [#978](https://github.com/Martian-Engineering/lossless-claw/pull/978) [`013de1f`](https://github.com/Martian-Engineering/lossless-claw/commit/013de1f1b0592eb97139c9387790daafdcb2653c) Thanks [@gorkem2020](https://github.com/gorkem2020)! - Recognize memory-first current turns in live coverage. When a memory or context plugin decorates the current turn with injected-context markers (for example `relevant-memories`, `relevant_memories`, `hindsight_memories`, or `active_memory_plugin`) and the channel adds no timestamp, the decorated current turn was previously dropped from live assembly and the model saw only the tag-stripped stored row. It is now re-appended so the decorated current turn is preserved. Because marker presence alone is not provenance proof, marker-based recognition is constrained to the last assembled user row (the current turn's persisted face), so a distinct turn that merely ends with an earlier row's body cannot be matched through a typed marker.
+
+- [#968](https://github.com/Martian-Engineering/lossless-claw/pull/968) [`3e05747`](https://github.com/Martian-Engineering/lossless-claw/commit/3e057473dbd1c6b4badfb6c040ff5e61f2299820) Thanks [@gorkem2020](https://github.com/gorkem2020)! - Skip replayed transcript entries that OpenClaw re-appends under fresh entry ids when the persisted row and new entry share the same canonical identity and full-precision inner source timestamp.
+
+- [#967](https://github.com/Martian-Engineering/lossless-claw/pull/967) [`8664c6e`](https://github.com/Martian-Engineering/lossless-claw/commit/8664c6ea674c37f766da900d3b78a01ed841a88c) Thanks [@gorkem2020](https://github.com/gorkem2020)! - Collapse metadata-wrapped OpenClaw runtime copies onto their bare persisted rows only when the covered transcript frontier proves same-turn alignment. Degraded after-turn dedup remains timestamp-gated, so repeated short user messages wrapped in forgeable metadata-shaped text are preserved instead of silently collapsed.
+
+- [#970](https://github.com/Martian-Engineering/lossless-claw/pull/970) [`004e266`](https://github.com/Martian-Engineering/lossless-claw/commit/004e266410a3f638e600fd047f04b56ae001825b) Thanks [@gorkem2020](https://github.com/gorkem2020)! - Create and report a SQLite backup before scoped doctor summary repair writes, matching the backup-first safety behavior used by rollover-split repair.
+
+- [#974](https://github.com/Martian-Engineering/lossless-claw/pull/974) [`421e7cb`](https://github.com/Martian-Engineering/lossless-claw/commit/421e7cb0606600991edc2feec4b85b22487a974a) Thanks [@gorkem2020](https://github.com/gorkem2020)! - Strip a structurally validated host chat-history recap block when reducing an OpenClaw inbound turn to its model-facing body, and when canonicalizing it for identity hashing. Building on the metadata-block strip landed in [#967](https://github.com/Martian-Engineering/lossless-claw/pull/967), a decorated inbound turn that also carries a recap of unread channel messages previously kept the recap embedded in its reduced body, so it never matched its bare persisted row and both got replayed to the model (see [#973](https://github.com/Martian-Engineering/lossless-claw/issues/973)).
+
+  The matcher recognizes the two recap headings OpenClaw core emits ("Chat history since last reply (untrusted, for context):" and "Conversation context (untrusted, chronological, selected for current message):", kept in a single extensible list) across both observed body grammars: the JSON-fenced message array and the older per-message prose line format. It also consumes the exact host JSON context blocks OpenClaw can emit between metadata and recap, such as reply target, thread starter, forwarded-message, and location context. Each combination is validated fail-closed: the strip requires a positive host `history_count`, an exact known heading, and a body that parses under the expected grammar, so user-authored recap-shaped text, a quoted heading, or a malformed payload is left untouched.
+
+  The identity canonicalization also excludes the host's volatile recap count, media count, and truncation fields whenever trusted history is present. On upgrade, the versioned OpenClaw identity repair refreshes message and bootstrap hashes that were already canonicalized before recap removal, preventing stale identity state from re-importing those rows.
+
+- [#977](https://github.com/Martian-Engineering/lossless-claw/pull/977) [`c71af2a`](https://github.com/Martian-Engineering/lossless-claw/commit/c71af2ae0723c4e5208a25fb47c58add39acf9b8) Thanks [@ryanngit](https://github.com/ryanngit)! - Document optional storage exclusions for OpenClaw active-memory and memory-core dreaming narrative sessions, including the breadth and data-retention implications of the recommended patterns.
+
+- [#945](https://github.com/Martian-Engineering/lossless-claw/pull/945) [`093ac5b`](https://github.com/Martian-Engineering/lossless-claw/commit/093ac5ba2db88eb4339cb97bf0d641773b4888db) Thanks [@mpz4life](https://github.com/mpz4life)! - Teach `lcm_grep` to search the first 512,000 bytes of externalized `large_files` text rows via the new `scope="files"` option. Add an optional `fileIds` parameter to restrict the search to specific file IDs. Each match reports the file ID, line number, byte offset, matched text, and a contextual snippet. Update `lcm_describe` to give accurate bounded-search guidance when inlined content is truncated. Honor `allConversations=true` for `scope="files"` by searching large files across all conversations.
+
+## 0.13.2
+
+### Patch Changes
+
+- [#855](https://github.com/Martian-Engineering/lossless-claw/pull/855) [`0681006`](https://github.com/Martian-Engineering/lossless-claw/commit/06810069254aa35d2f013c3ebb02fadc90d0db12) Thanks [@bowenluo718](https://github.com/bowenluo718)! - Prevent `afterTurn` replay batches from duplicating messages whose stored content was rewritten during ingest, such as large-file payload references.
+
+- [#843](https://github.com/Martian-Engineering/lossless-claw/pull/843) [`3a0b485`](https://github.com/Martian-Engineering/lossless-claw/commit/3a0b4851b193fc32c88be3233bce7d6fff82976e) Thanks [@mpz4life](https://github.com/mpz4life)! - Expose `fallbackMaxTokens` as a documented plugin configuration option for deterministic fallback summaries.
+
+- [#920](https://github.com/Martian-Engineering/lossless-claw/pull/920) [`8c95d55`](https://github.com/Martian-Engineering/lossless-claw/commit/8c95d5516950fc778a9f94704eb5f9bde34657f7) Thanks [@jetd1](https://github.com/jetd1)! - Dedup adjacent delivery-mirror messages by content identity in `ingestSingle`. OpenClaw writes two JSONL entries per assistant turn — the model response (with reasoning + text) and a delivery-mirror (text only, `model="delivery-mirror"`). Both share the same `identity_hash` because `toStoredMessage` strips reasoning, but they have different transcript entry ids, so the entry-id idempotency check does not catch the mirror. This skips delivery-mirror ingestion only when the immediately previous assistant message has the same identity and preserved reasoning content, including top-level `reasoning_content` metadata.
+
+- [#919](https://github.com/Martian-Engineering/lossless-claw/pull/919) [`753721f`](https://github.com/Martian-Engineering/lossless-claw/commit/753721fc95b763c95a620f535c6743ba70b1c34a) Thanks [@ralf003](https://github.com/ralf003)! - Allow forced compaction recovery to clear summary spend backoff so overflow repair is not blocked by an earlier failed summary attempt.
+
+- [#940](https://github.com/Martian-Engineering/lossless-claw/pull/940) [`186df03`](https://github.com/Martian-Engineering/lossless-claw/commit/186df03967097d658473835cab3dac973dbf47e6) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Add a packaged `lossless-claw-migrate-sessions` CLI for dry-run-by-default OpenClaw JSONL session backfills into `lcm.db`.
+
+- [#946](https://github.com/Martian-Engineering/lossless-claw/pull/946) [`5d585c7`](https://github.com/Martian-Engineering/lossless-claw/commit/5d585c7a8f6b7f64c21faba50fe3084d05c910f1) Thanks [@mpz4life](https://github.com/mpz4life)! - Keep oversized `lcm_describe` tool results inline instead of wrapping them in another externalized tool-output stub, so drilldown responses return the requested content directly.
+
+- [#914](https://github.com/Martian-Engineering/lossless-claw/pull/914) [`bf7e359`](https://github.com/Martian-Engineering/lossless-claw/commit/bf7e35913f952f6ba8905467fb352dc0d0c84f2d) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Declare the `/lossless` and `/lcm` runtime slash commands in plugin metadata and align command docs around `/lossless` as the primary command.
+
+- [#931](https://github.com/Martian-Engineering/lossless-claw/pull/931) [`74bebd6`](https://github.com/Martian-Engineering/lossless-claw/commit/74bebd61df9c20e24fd8314239f666730b499962) Thanks [@gorkem2020](https://github.com/gorkem2020)! - Recover stuck afterTurn reconciliation for OpenClaw room-event and unaddressed Delivery frontiers so compaction can resume from placeholder or checkpoint-missing sessions.
+
+- [#926](https://github.com/Martian-Engineering/lossless-claw/pull/926) [`789ea5e`](https://github.com/Martian-Engineering/lossless-claw/commit/789ea5e5828cf05c2f986edd954f396e908c3201) Thanks [@gorkem2020](https://github.com/gorkem2020)! - Preserve the decorated live current turn across channels by recognizing it structurally and appending it when the stored transcript only has the bare body. Ambiguous same-body stored rows are kept until a stable turn identity exists, so live-current-turn recovery remains lossless.
+
+- [#943](https://github.com/Martian-Engineering/lossless-claw/pull/943) [`4fe79fa`](https://github.com/Martian-Engineering/lossless-claw/commit/4fe79faf5a40fe06bb8914d7468e48818a7f00d9) Thanks [@gorkem2020](https://github.com/gorkem2020)! - Demote fully redundant afterTurn frontier-overlap fail-closed logs from warn to debug while preserving warnings for partial or under-covered overlap batches.
+
+- [#937](https://github.com/Martian-Engineering/lossless-claw/pull/937) [`a4f5502`](https://github.com/Martian-Engineering/lossless-claw/commit/a4f55020c1b6c1fdda7fd6c5be44494f3a38e842) Thanks [@gorkem2020](https://github.com/gorkem2020)! - Log benign volatile live-input appends at debug instead of warn, while preserving warnings when the append goes over budget or evicts assembled messages.
+
+- [#932](https://github.com/Martian-Engineering/lossless-claw/pull/932) [`f7f3b15`](https://github.com/Martian-Engineering/lossless-claw/commit/f7f3b1554f48a030bf342a44e09ff3be47c0b08a) Thanks [@gorkem2020](https://github.com/gorkem2020)! - Recover base channel sessions that were stuck in afterTurn reconciliation when their raw ids also appeared in same-agent same-channel thread or active-memory fork history.
+
+- [#927](https://github.com/Martian-Engineering/lossless-claw/pull/927) [`c70e4df`](https://github.com/Martian-Engineering/lossless-claw/commit/c70e4df39d8182ef3b62a15e4b71450627a89e52) Thanks [@gorkem2020](https://github.com/gorkem2020)! - Tighten the structural same-turn supersede so it only collapses a runtime or live copy onto a bare persisted row when the bare body is carried under a channel timestamp, rather than whenever the content merely contains the substring "(untrusted metadata)" or ends with a line equal to the bare body. Structured metadata blocks remain untrusted user-facing text until OpenClaw provides a trusted marker, so metadata-only copies are preserved rather than risk silently superseding an earlier user turn. The guard now covers both the store after-turn path and the assembly supersede path.
+
+- [#911](https://github.com/Martian-Engineering/lossless-claw/pull/911) [`e13a1ff`](https://github.com/Martian-Engineering/lossless-claw/commit/e13a1ff7eb22803841013311cdcda0dbf8cffb9c) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Warn from `/lossless` status and doctor when OpenClaw metadata shows lossless-claw installed from an exact npm version, and document `@latest` as the routine install/update track.
+
+## 0.13.1
+
+### Patch Changes
+
+- [#908](https://github.com/Martian-Engineering/lossless-claw/pull/908) [`612bd99`](https://github.com/Martian-Engineering/lossless-claw/commit/612bd996f53d20ea5107465f8c1a313fa3cb84ff) Thanks [@jalehman](https://github.com/jalehman)! - Prefer transcript message timestamps during import so replayed history preserves message ordering when envelope timestamps are coarse.
+
+- [#901](https://github.com/Martian-Engineering/lossless-claw/pull/901) [`7321e24`](https://github.com/Martian-Engineering/lossless-claw/commit/7321e243ac1e64ec5f44054f136c25d5fe63de7f) Thanks [@SYU8384](https://github.com/SYU8384)! - Canonicalize OpenClaw inbound metadata when computing message identity and bootstrap hashes so volatile message metadata does not stall context continuity while raw transcript content stays lossless.
+
+- [#909](https://github.com/Martian-Engineering/lossless-claw/pull/909) [`286e48f`](https://github.com/Martian-Engineering/lossless-claw/commit/286e48fcb2c702cf5cb2da33dc2f501b4fd08632) Thanks [@jalehman](https://github.com/jalehman)! - Clean up `/lossless` status output by using the last runtime maintenance budget when no explicit assembly cap is configured, renaming the frontier token metric, removing repair-source pressure from default status reasons, and shortening maintenance details to actionable state. Also tighten `/lossless doctor apply` safety output to show scoped repair targets, repair input tokens, and deduplicated repair target source tokens instead of whole-conversation message-count or compressed-source proxies.
+
+- [#906](https://github.com/Martian-Engineering/lossless-claw/pull/906) [`623c087`](https://github.com/Martian-Engineering/lossless-claw/commit/623c087057cf4d5502312ceba1fd1a80f8c80a2e) Thanks [@jalehman](https://github.com/jalehman)! - Add `/lossless doctor` detection and confirmed repair for safe whole-DB fresh-transcript rollover split memory.
+
+- [#907](https://github.com/Martian-Engineering/lossless-claw/pull/907) [`70e65d0`](https://github.com/Martian-Engineering/lossless-claw/commit/70e65d046349f84aadd70d2c1d3b4498c72709f4) Thanks [@jalehman](https://github.com/jalehman)! - Fix default-scoped recall tools so they receive the active OpenClaw runtime session id when resolving the current LCM conversation.
+
+- [#903](https://github.com/Martian-Engineering/lossless-claw/pull/903) [`fad7291`](https://github.com/Martian-Engineering/lossless-claw/commit/fad72915af6ce22bc70ce0e597c7cde16abaec49) Thanks [@jalehman](https://github.com/jalehman)! - Preserve conversation ids during fresh transcript rollover by rebinding the existing LCM conversation to the new runtime session instead of archiving it and creating an empty replacement.
+
+## 0.13.0
+
+### Minor Changes
+
+- [#847](https://github.com/Martian-Engineering/lossless-claw/pull/847) [`264f63a`](https://github.com/Martian-Engineering/lossless-claw/commit/264f63a4adb1d2c2151241afe7354a35e71ce6e2) Thanks [@hubofvalley](https://github.com/hubofvalley)! - Add scoped context threshold overrides for matching model ids, model context-window
+  ranges, and session patterns.
+
+- [#832](https://github.com/Martian-Engineering/lossless-claw/pull/832) [`2c3b906`](https://github.com/Martian-Engineering/lossless-claw/commit/2c3b9069c960a231b3e5b264b707bb55bd783379) Thanks [@mpz4life](https://github.com/mpz4life)! - Add `enableSummaryThinking` config option to control whether summarization calls request a low reasoning budget from the model. Defaults to `true` (preserves current behavior). Set to `false` to disable reasoning and keep summarization output concise when reasoning is not needed for faithful summaries.
+
+- [#854](https://github.com/Martian-Engineering/lossless-claw/pull/854) [`0837340`](https://github.com/Martian-Engineering/lossless-claw/commit/0837340d215a30817fa6baec034705622b86baee) Thanks [@jalehman](https://github.com/jalehman)! - Rebuild transcript reconciliation around the stable JSONL envelope ids that OpenClaw already writes. Transcript imports are now idempotent by construction (`messages.transcript_entry_id` with a partial unique index), the afterTurn runtime batch is reconciled by exact alignment against the covered transcript frontier instead of heuristic dedup, rewritten/rotated transcripts are recognized as declared epoch rollovers via the session header id instead of path/size heuristics, and flush-lagged runtime rows are healed in place by adopting the catch-up entry's id rather than duplicated. Entry-id anchoring also survives post-ingest content rewriting (externalized tool results), which previously could freeze conversations. The content-identity machinery remains as the fallback for transcripts without envelope ids. Design: specs/transcript-reconciliation-by-entry-id.md.
+
+### Patch Changes
+
+- [#885](https://github.com/Martian-Engineering/lossless-claw/pull/885) [`9f36aa3`](https://github.com/Martian-Engineering/lossless-claw/commit/9f36aa300c58bada5e45e7da419b77815b688b12) Thanks [@rafaelreis-r](https://github.com/rafaelreis-r)! - Fix a `[#822](https://github.com/Martian-Engineering/lossless-claw/issues/822)` `afterTurn` deadlock where a conversation with an all-zero placeholder `conversation_bootstrap_state` row and a persisted frontier of only non-anchoring rows (e.g. one or more injected `Conversation info (untrusted metadata)` preambles) never re-imported its on-disk transcript. The placeholder-checkpoint-recovery reconcile ran without `allowNoAnchorImport`, so it imported 0 messages and never advanced the checkpoint; every turn then emitted the `did not cover the transcript frontier` warning, `assemble()` fell back to the raw transcript, and compaction never ran for that conversation.
+
+  The placeholder recovery now opens a no-anchor import, but only when the persisted frontier is proven to hold no real conversation content — generalizing [#837](https://github.com/Martian-Engineering/lossless-claw/issues/837)'s single-injected-metadata-preamble check to a frontier composed entirely of non-anchoring injected-metadata rows (any count, via a bounded scan). A frontier with real anchoring rows conservatively freezes per [#649](https://github.com/Martian-Engineering/lossless-claw/issues/649)'s no-proof-no-advance guard, so an unrelated/rotated transcript can never be stitched onto real history (the failure mode that closed [#824](https://github.com/Martian-Engineering/lossless-claw/issues/824)). For the proven-safe case the no-anchor import cap is lifted so a transcript larger than the cap recovers fully, bounded by the transcript length rather than left unbounded. The downstream import remains guarded by replay-overlap detection, the delivery-only block (now also applied to this lane), and the cross-conversation raw-id guard.
+
+  The same generalized non-anchoring-frontier gate now also drives the afterTurn checkpoint-missing lane ([#837](https://github.com/Martian-Engineering/lossless-claw/issues/837)), which previously required exactly one persisted frontier row: a conversation that accumulated several injected-metadata preambles before losing its checkpoint recovers there too, and the cap lift applies under the same proof.
+
+- [#838](https://github.com/Martian-Engineering/lossless-claw/pull/838) [`e9697e4`](https://github.com/Martian-Engineering/lossless-claw/commit/e9697e4f0a5b42af1838d0e1d7e334306c59c8a7) Thanks [@holgergruenhagen](https://github.com/holgergruenhagen)! - Fix an `afterTurn` deadlock where a conversation with `bootstrapped_at` set but no `conversation_bootstrap_state` row (`reason="checkpoint-missing"`) and a non-anchoring DB frontier (e.g. a single injected `Conversation info (untrusted metadata)` preamble) imported 0 messages and never persisted a checkpoint. Such conversations emitted the `found no anchor and imported 0 messages` / `did not cover the transcript frontier` warning pair on every turn forever, with compaction permanently disabled until the row was archived by hand.
+
+  The recovery path (`allowNoAnchorImportOnCheckpointMissing`) previously ran only on the rotate lane. The `afterTurn` lane now also recovers a `checkpoint-missing` no-anchor frontier, but only for already-bootstrapped conversations (`bootstrapped_at` set) — a never-bootstrapped conversation with a divergent rewritten transcript still freezes per [#649](https://github.com/Martian-Engineering/lossless-claw/issues/649)'s no-proof-no-advance guard. The downstream no-anchor import remains guarded by replay-overlap detection, the import cap, and the delivery-only block.
+
+  Fixes [#837](https://github.com/Martian-Engineering/lossless-claw/issues/837).
+
+- [#886](https://github.com/Martian-Engineering/lossless-claw/pull/886) [`e6568d7`](https://github.com/Martian-Engineering/lossless-claw/commit/e6568d77019bff58992d84c3848436fbb83d6119) Thanks [@rafaelreis-r](https://github.com/rafaelreis-r)! - `afterTurn` now fails closed when the transcript reconcile throws. The catch handler previously left the initialized in-sync default (`hasOverlap: true`) in place, so a thrown reconcile persisted the live batch AND refreshed the checkpoint to EOF — silently advancing past transcript history that was never reconciled into the DB. The catch now reports the turn as not covered, skipping batch persistence and checkpoint refresh for that turn; nothing is lost because the transcript retains the turn and the next successful reconcile imports it.
+
+- [#864](https://github.com/Martian-Engineering/lossless-claw/pull/864) [`68ed199`](https://github.com/Martian-Engineering/lossless-claw/commit/68ed19954129e2178895415ca8318dc78fa5f05c) Thanks [@jalehman](https://github.com/jalehman)! - Resolve ambiguous session-key runtime rollovers when the new transcript is provably fresh.
+
+  When a runtime session rolls to a new sessionId while the key's conversation
+  still tracks an existing transcript file, the ambiguity guard froze the lane
+  entirely: no adoption, no rotation, no persistence — indefinitely. On a live
+  instance two agent main lanes ran frozen for a week, silently recording
+  nothing while their transcripts grew.
+
+  bootstrap and afterTurn now attempt a tier-2 resolution using full-transcript
+  evidence: when the rolled transcript is provably fresh — every entry carries
+  a usable timestamp (message or envelope) postdating the conversation's last
+  persisted message, and no entry's identity overlaps the conversation's recent
+  persisted history — the rollover is a legitimate reset, so the old
+  conversation is archived (fully preserved and queryable) and the new session
+  binds and bootstraps normally. Freshness is judged on content+time evidence,
+  never transcript size, so lanes that ran frozen for days self-heal on their
+  first turn after upgrade. Anything short of proof (overlap, stale or missing
+  timestamps, no comparable persisted content) stays frozen exactly as before,
+  and a rotation that lands as a lifecycle no-op is reported honestly instead
+  of claiming the lane healed. assemble deliberately does NOT rotate: it only
+  sees the host's live window, which is not transcript evidence.
+
+  Telemetry: "ambiguous rollover resolved by fresh-transcript rotation",
+  "ambiguous rollover not provably fresh (freshness=...)", and "rotation had
+  no effect" warn lines.
+
+- [#860](https://github.com/Martian-Engineering/lossless-claw/pull/860) [`94f3431`](https://github.com/Martian-Engineering/lossless-claw/commit/94f3431b31ba63de2b8cd71fcc244d75fe9c121e) Thanks [@jalehman](https://github.com/jalehman)! - Unfreeze anchored transcript reconcile when the backlog exceeds the import cap.
+
+  A session whose transcript grew past the reconcile import cap (e.g. heavy
+  old-harness history) froze permanently: every pass logged "import cap
+  exceeded ... Aborting to prevent flood", imported nothing, and afterTurn
+  skipped persistence to avoid advancing the frontier — while the backlog kept
+  growing faster than the cap ever could. The live incident left a main-topic
+  conversation with 1,700+ unpersisted messages and silent data loss on every
+  turn.
+
+  When the missing tail is anchored (lineage proven by an identity anchor in
+  this conversation), reconcile now imports a bounded oldest-first chunk per
+  pass instead of aborting: order is preserved, per-pass flood exposure stays
+  capped, the growing message count raises the cap, and repeated passes
+  converge until the backlog drains. The checkpoint/frontier still does not
+  advance while a pass is capped. No-anchor caps (unproven lineage, e.g.
+  path-mismatched epochs) still block entirely. Telemetry: the warn line is now
+  "import cap chunking ... importing N/M anchored backlog messages this pass".
+
+  Extended after the entry-id reconciliation rework ([#854](https://github.com/Martian-Engineering/lossless-claw/issues/854)): the same chunked
+  drain now applies to the entry-id anchored path — which carries 100% of
+  current-format traffic and had the same permanent-freeze shape — and to
+  fully id-bearing no-anchor epochs (declared rollovers), where every entry
+  adopts or imports by verified id, so a kept tail beyond the cap drains in
+  bounded passes instead of freezing before stale-id adoption can heal it.
+  After the first chunk persists ids, the entry-id anchor takes over on
+  subsequent passes. Id-less no-anchor batches still block entirely.
+
+- [#755](https://github.com/Martian-Engineering/lossless-claw/pull/755) [`a5c3a8b`](https://github.com/Martian-Engineering/lossless-claw/commit/a5c3a8bd87000ac357a7d1817e499014524271aa) Thanks [@rafaelreis-r](https://github.com/rafaelreis-r)! - Make `assertNoReplayTimestampFlood` role-aware so legitimate fast bursts of identical `tool`/`assistant`/`system` messages from sub-agents are not misclassified as replay attacks. External user input keeps the aggregate role/timestamp replay budget, while internal runtime output is budgeted by exact message identity. The threshold is split into two configurable options:
+
+  - `replayFloodThresholdExternal` (default `3`, env `LCM_REPLAY_FLOOD_THRESHOLD_EXTERNAL`) — applies to replay-like `role=user` rows, preserving legacy replay defense for third-partyly-rebroadcastable input.
+  - `replayFloodThresholdInternal` (default `32`, env `LCM_REPLAY_FLOOD_THRESHOLD_INTERNAL`) — applies to `role=tool/assistant/system`, absorbing legitimate same-second idempotent runtime output while still bounding pathological loops.
+
+  Fixes a class of false-positives that cascaded into `skipping compaction` / reconcile failures on cron and sub-agent workloads. Related to [#639](https://github.com/Martian-Engineering/lossless-claw/issues/639).
+
+- [#857](https://github.com/Martian-Engineering/lossless-claw/pull/857) [`36100ce`](https://github.com/Martian-Engineering/lossless-claw/commit/36100ce11e9c9a86bfca626174ef38dea82e555f) Thanks [@jalehman](https://github.com/jalehman)! - Bound assemble() output by serialized model-boundary token estimate.
+
+  Live messages that carry structured tool payloads (e.g. transcripts imported
+  from a previous harness) were estimated by text blocks only, undercounting the
+  real prompt by 2-3x. assemble() could return a context the host's LLM-boundary
+  estimator rejected as far over budget, wedging the session in a
+  compact/overflow loop while every internal pressure check stayed green.
+
+  Token estimates for live messages now serialize the full message structure
+  (with a fixed per-part substitution for embedded binary payloads), live
+  fallback paths return budget-bounded suffixes instead of the unbounded
+  transcript, and a final serialized-estimate clamp guarantees assembled output
+  never exceeds the token budget. Assemble telemetry now logs the serialized
+  estimate, the internal estimate, and clamp activity (`serializedClamped=`,
+  `[lcm] assemble: serialized budget clamp`, `[lcm] assemble: bounded live
+fallback`) for live monitoring.
+
+- [#742](https://github.com/Martian-Engineering/lossless-claw/pull/742) [`13fe4f6`](https://github.com/Martian-Engineering/lossless-claw/commit/13fe4f6e813be8e68fc46295eb9ed2c17442415c) Thanks [@Yiaos](https://github.com/Yiaos)! - Require OpenClaw 2026.5.28 so context-engine assembly can include host memory supplements.
+
+- [#809](https://github.com/Martian-Engineering/lossless-claw/pull/809) [`d73e251`](https://github.com/Martian-Engineering/lossless-claw/commit/d73e2512f9de23f2d2366d477ec6d414deedbadd) Thanks [@jwavro](https://github.com/jwavro)! - Sanitize duplicate assistant tool-use blocks during context assembly so replayed history cannot produce provider-invalid tool call payloads.
+
+- [#835](https://github.com/Martian-Engineering/lossless-claw/pull/835) [`a5f7823`](https://github.com/Martian-Engineering/lossless-claw/commit/a5f782376a4f414a29dbdab07c155075d9fda6a2) Thanks [@jalehman](https://github.com/jalehman)! - Deduplicate replayed checkpoint tool-result batches without dropping changed payloads or metadata.
+
+- [#866](https://github.com/Martian-Engineering/lossless-claw/pull/866) [`7ed601f`](https://github.com/Martian-Engineering/lossless-claw/commit/7ed601f759353586d8b3f5856c5577b6235609d8) Thanks [@jalehman](https://github.com/jalehman)! - Judge append-only transcript imports by entry id, not content identity.
+
+  A tool loop that re-issues a byte-identical tool call every iteration made
+  the append-only import guard declare each appended pair "already persisted"
+  (content identity matched the previous iteration), forcing a full transcript
+  re-read per tool call while the covered-frontier alignment refused every
+  runtime batch — reconcile churned on every iteration of the loop while the
+  model's context stopped advancing (live incident lossless-claw-3071).
+
+  The guard now reasons in transcript entry ids: a fresh entry id is a new
+  entry regardless of content. Full reconciliation is still required for the
+  three cases that genuinely need it — an already-persisted entry id (replay),
+  a fresh id whose content matches an unstamped persisted row (flush-lag
+  catch-up that must adopt, not duplicate), and an entry reparenting onto a
+  non-tip persisted entry (host suffix rewrite needing stale-id re-stamping).
+  Parents unknown to the DB (pruned rows, replay-filtered entries) are treated
+  as genuine continuation since the append-only checkpoint already verified
+  the file prefix.
+
+- [#846](https://github.com/Martian-Engineering/lossless-claw/pull/846) [`21577ea`](https://github.com/Martian-Engineering/lossless-claw/commit/21577ea45ecf8232689e87660367026dab6a6f17) Thanks [@jalehman](https://github.com/jalehman)! - Skip synthetic OpenClaw heartbeat transcript rows during bootstrap/reconcile imports so heartbeat-only tails cannot trip replay-flood quarantine.
+
+- [#718](https://github.com/Martian-Engineering/lossless-claw/pull/718) [`5b06bd0`](https://github.com/Martian-Engineering/lossless-claw/commit/5b06bd08ee393173afc846c86d1c3fe90ef678ff) Thanks [@jalehman](https://github.com/jalehman)! - Write lossless-claw operational logs to an independent daily JSONL log file beside OpenClaw's logs.
+
+- [#854](https://github.com/Martian-Engineering/lossless-claw/pull/854) [`0837340`](https://github.com/Martian-Engineering/lossless-claw/commit/0837340d215a30817fa6baec034705622b86baee) Thanks [@jalehman](https://github.com/jalehman)! - Follow the transcript's parentId leaf path during reconciliation and adopt re-issued entry ids onto rows stranded by host copy-on-write rewrites (rewriteTranscriptEntries, host tool-result truncation, gateway chat edits), so rewritten suffixes re-stamp in place instead of importing as content duplicates.
+
+- [#862](https://github.com/Martian-Engineering/lossless-claw/pull/862) [`581ff80`](https://github.com/Martian-Engineering/lossless-claw/commit/581ff80faac7f2ba460d5b56efe8bdba7777c507) Thanks [@mpz4life](https://github.com/mpz4life)! - Stub oversized live tool results before assemble fallback paths send context to the model, so degraded assembly keeps compact file references instead of raw payloads.
+
+- [#823](https://github.com/Martian-Engineering/lossless-claw/pull/823) [`fb96214`](https://github.com/Martian-Engineering/lossless-claw/commit/fb9621430682c48374aff35498e687d404ad95a8) Thanks [@rafaelreis-r](https://github.com/rafaelreis-r)! - Fix the [#639](https://github.com/Martian-Engineering/lossless-claw/issues/639) Mode 2 deferred-compaction wedge: treat terminal compaction exhaustion as non-retryable instead of pinning the conversation in a permanent retry loop.
+
+  When a threshold sweep takes no action and does not fail (no eligible leaf/condensed candidates remain) while the conversation is still over target, compaction can never make progress — it shrinks STORED leaves but cannot reduce the host's OBSERVED live tokens. Previously this returned `ok=false`/`reason="live context still exceeds target"`, so the deferred-debt drain kept the maintenance row `pending=1`, climbed `retry_attempts`, opened summary-spend backoff, and thrashed the assemble degraded-fallback every turn.
+
+  `executeCompactionCore` now flags this terminal state as `exhausted` (while still returning `ok=false` so overflow recovery and [#15](https://github.com/Martian-Engineering/lossless-claw/issues/15) keep the honest still-over-target signal), and `consumeDeferredCompactionDebt` treats an exhausted result as a completed no-op: it clears the debt (`keepPending=false`, no failure summary) instead of retrying forever. Emergency assemble drains still return bounded degraded live context for the current over-budget turn when exhaustion is discovered inline. Adds deterministic regressions that reproduce the wedge (matches the production `conversation_compaction_maintenance.last_failure_summary="live context still exceeds target"`).
+
+  Addresses the deferred-compaction-loop half of [#639](https://github.com/Martian-Engineering/lossless-claw/issues/639) (the residual that [#621](https://github.com/Martian-Engineering/lossless-claw/issues/621)/[#681](https://github.com/Martian-Engineering/lossless-claw/issues/681) did not cover). Based on @Grynn's exhaustion-handling proposal in the [#639](https://github.com/Martian-Engineering/lossless-claw/issues/639) thread.
+
+- [#577](https://github.com/Martian-Engineering/lossless-claw/pull/577) [`bb59318`](https://github.com/Martian-Engineering/lossless-claw/commit/bb59318bbf408d374b9952dc5b9c9b8128c548df) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Complete the thinking/reasoning half-fix from PR [#503](https://github.com/Martian-Engineering/lossless-claw/issues/503) in v0.9.3. [#503](https://github.com/Martian-Engineering/lossless-claw/issues/503) sanitized summarizer **input** at `CompactionEngine.leafPass`; this PR closes the two remaining gaps that were in scope:
+
+  - **Output side**: when the summary provider response would persist a reasoning-shaped payload (text wrapped in `<think>…</think>` / `<thinking>…</thinking>` / `<reasoning>…</reasoning>`, or opened with a `[thinking]` / `[reasoning]` label) as the summary body, log and treat the summary as empty so the existing envelope → retry → deterministic-fallback chain runs instead of silently storing reasoning text. Mitigates the silent-persist failure mode reported by [#471](https://github.com/Martian-Engineering/lossless-claw/issues/471) (vLLM+Qwen3) and [#542](https://github.com/Martian-Engineering/lossless-claw/issues/542) (Kimi K2.6).
+  - **Non-leaf passes**: `extractMeaningfulMessageText` is now applied at every summarizer entry point — `leafPass` (already covered by [#503](https://github.com/Martian-Engineering/lossless-claw/issues/503)), the condensed/merge pass that re-summarizes leaf summaries, and the prior-summary-context resolver. Summaries built from already-sanitized leaves can no longer reintroduce raw thinking/reasoning blocks at higher levels, including from legacy data persisted before [#503](https://github.com/Martian-Engineering/lossless-claw/issues/503).
+
+  Doctor remediation for legacy assistant rows that contain only thinking blocks (sub-fix F8 from the issue) is deferred — the existing doctor cleaner architecture operates on conversation-level deletion, not message-row remediation, and adding a backup-table pattern would significantly expand the surface area of this PR. Tracked separately.
+
+- [#852](https://github.com/Martian-Engineering/lossless-claw/pull/852) [`173fd21`](https://github.com/Martian-Engineering/lossless-claw/commit/173fd21f00938fb4efe01db1b1d6a7c9ea4ca26e) Thanks [@jalehman](https://github.com/jalehman)! - Preserve context-engine lifecycle hooks when adding host memory supplements to assembled prompts.
+
+- [#881](https://github.com/Martian-Engineering/lossless-claw/pull/881) [`974c850`](https://github.com/Martian-Engineering/lossless-claw/commit/974c850e8854bb260ca108b6dee239c5c98a54f4) Thanks [@christian-lallo](https://github.com/christian-lallo)! - Preserve original transcript timestamps during recovery imports instead of stamping import time.
+
+- [#840](https://github.com/Martian-Engineering/lossless-claw/pull/840) [`bf1452f`](https://github.com/Martian-Engineering/lossless-claw/commit/bf1452f994c035d3e595d8e3c8a6914f762a8774) Thanks [@jalehman](https://github.com/jalehman)! - Skip append-only transcript reconciliation imports for heartbeat afterTurn calls and advance the checkpoint over the heartbeat delta.
+
+- [#854](https://github.com/Martian-Engineering/lossless-claw/pull/854) [`0837340`](https://github.com/Martian-Engineering/lossless-claw/commit/0837340d215a30817fa6baec034705622b86baee) Thanks [@jalehman](https://github.com/jalehman)! - Remove the runtime dependency on @earendil-works/pi-coding-agent: rotate and transcript-GC entry-id mapping now use the plugin's own read-only leaf-path parser instead of SessionManager.open, which migrated and rewrote v1/v2 or empty session files as a side effect and no longer tracks OpenClaw's in-tree transcript format. The pi packages remain as devDependencies for test fixtures.
+
+- [#865](https://github.com/Martian-Engineering/lossless-claw/pull/865) [`c594352`](https://github.com/Martian-Engineering/lossless-claw/commit/c594352493802a75bface4958b997adaf215f895) Thanks [@jalehman](https://github.com/jalehman)! - Exclude template noise from the ambiguous-rollover freshness overlap check.
+
+  The tier-2 rollover resolution false-blocked on the very lane it was built
+  for: a week-idle conversation whose entire recent history was synthetic
+  heartbeat traffic. Every session's transcript contains identical
+  "[OpenClaw heartbeat poll]" / "HEARTBEAT_OK" lines, so the identity-overlap
+  test matched 46 heartbeat rows and reported plausible lineage where there
+  was none.
+
+  The overlap comparison now considers only lineage-discriminating content:
+  synthetic heartbeat traffic and content that recurs within the window are
+  excluded from both sides, and the window widens (50 -> 500) when the recent
+  history yields nothing comparable. When even the widened window is pure
+  template noise, the overlap test is acknowledged as no-signal and the
+  strict per-entry time gate decides alone — every new entry must still
+  postdate the conversation's last persisted message. Real unique-content
+  overlap still freezes the lane exactly as before.
+
+- [#842](https://github.com/Martian-Engineering/lossless-claw/pull/842) [`ea54c70`](https://github.com/Martian-Engineering/lossless-claw/commit/ea54c7076d0f491e291b177a96ea56d52860b02b) Thanks [@jalehman](https://github.com/jalehman)! - Skip startup maintenance during OpenClaw runtime inspection and read-only plugin discovery.
+
+- [#858](https://github.com/Martian-Engineering/lossless-claw/pull/858) [`b4c97ec`](https://github.com/Martian-Engineering/lossless-claw/commit/b4c97ec49b19999453d565733b6bed148bea5f7a) Thanks [@jalehman](https://github.com/jalehman)! - Stop punishing progressing compaction with the summary spend backoff.
+
+  A threshold sweep that hit its per-sweep wall-clock deadline while still
+  reducing tokens recorded "compacted but still over target" and opened a
+  30-minute spend backoff, which then blocked emergency drains and silently
+  no-opped user-initiated /compact. Recovery that was working was treated the
+  same as recovery that could never work.
+
+  Threshold sweeps now chain within the operation-wide deadline
+  (`compactUntilUnderDeadlineMs`, capped by `maxSweepIterations`) instead of
+  failing after one bounded sweep; the spend backoff only opens when a round
+  makes no further progress; and manual compaction clears an open backoff
+  (an explicit repair request is informed consent to spend). Telemetry: the
+  compact done line gains `chainedSweeps=`/`spendBackoffOpened=`, plus
+  "spend backoff skipped" and "manual request cleared summary spend backoff"
+  lines for live monitoring.
+
+- [#891](https://github.com/Martian-Engineering/lossless-claw/pull/891) [`69ef486`](https://github.com/Martian-Engineering/lossless-claw/commit/69ef48646e3a8cb17574036d2a5369a2aaa1ff92) Thanks [@jalehman](https://github.com/jalehman)! - Use the configured leaf or condensed target token budget when retrying empty compaction summaries, giving high-reasoning summary models enough headroom to emit text instead of falling back to deterministic truncation.
+
+- [#793](https://github.com/Martian-Engineering/lossless-claw/pull/793) [`cbf992c`](https://github.com/Martian-Engineering/lossless-claw/commit/cbf992c854ddbd4c9f5674895a0284b9c313f8a4) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Inherit the configured summary provider when `LCM_SUMMARY_MODEL` overrides the
+  summary model without also setting `LCM_SUMMARY_PROVIDER`.
+
+- [#859](https://github.com/Martian-Engineering/lossless-claw/pull/859) [`1394c10`](https://github.com/Martian-Engineering/lossless-claw/commit/1394c10e4b0f8a30d94bf0eacc354d5e0d709b30) Thanks [@jalehman](https://github.com/jalehman)! - Surface terminal compaction exhaustion as an explicit transcript-reset verdict.
+
+  When a threshold sweep finds no eligible candidates while host-observed
+  pressure keeps the session over target, the host is rebuilding prompts from
+  live transcript state the engine cannot shrink — retrying stored compaction
+  can never converge. This terminal state previously reported the generic
+  "live context still exceeds target", which hosts answer with misleading
+  reserve-tuning advice. compact() now returns "stored compaction exhausted but
+  live context still exceeds target; transcript reset required" (alongside the
+  existing exhausted flag that clears deferred debt). The verdict requires an
+  explicit host-observed token count and never fires on budget-stopped sweeps,
+  so estimator gaps or interrupted sweeps cannot condemn recoverable sessions.
+  Telemetry: a "[lcm] compact: transcript wedge detected" warn line with
+  stored/observed/overhead counts.
+
+- [#851](https://github.com/Martian-Engineering/lossless-claw/pull/851) [`c68286d`](https://github.com/Martian-Engineering/lossless-claw/commit/c68286df8c22f6a40abaea5b90851586e97414eb) Thanks [@steipete](https://github.com/steipete)! - Update Pi runtime dependencies to 0.79.x for the current runtime API surface.
+
+## 0.12.0
+
+### Minor Changes
+
+- [#466](https://github.com/Martian-Engineering/lossless-claw/pull/466) [`fc3c65f`](https://github.com/Martian-Engineering/lossless-claw/commit/fc3c65f05a56d6a3bcf331b459e9383499122719) Thanks [@jetd1](https://github.com/jetd1)! - Strip auto-injected memory/context plugin blocks before compaction summarization.
+
+  Memory and context plugins (`active-memory`, `memory-lancedb`, `hindsight-openclaw`, etc.) prepend XML-tagged blocks to user messages via the `prependContext` hook. Without stripping, the compaction summarizer treats these ephemeral retrieval blocks as real conversation content, permanently corrupting summaries.
+
+  New `stripInjectedContextTags` config option (string array, defaults to well-known plugin tags). Override via plugin config or `LCM_STRIP_INJECTED_CONTEXT_TAGS` env var. Set to `[]` to disable.
+
+### Patch Changes
+
+- [#788](https://github.com/Martian-Engineering/lossless-claw/pull/788) [`a637fd3`](https://github.com/Martian-Engineering/lossless-claw/commit/a637fd31bf1dca49e585cf25d21af02af70f6050) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Add a per-session summarization spend guard and back off failed deferred compaction retries to avoid repeated non-auth model spend.
+
+- [#715](https://github.com/Martian-Engineering/lossless-claw/pull/715) [`57afa5c`](https://github.com/Martian-Engineering/lossless-claw/commit/57afa5caf96aab5789d386fb4d7249f8ae879004) Thanks [@jalehman](https://github.com/jalehman)! - Keep deferred threshold compaction off the normal next-turn assemble path.
+
+  Pending deferred compaction debt is now left for the after-turn background drain
+  or host-approved maintenance while the live prompt is still within the active
+  token budget. `assemble()` only drains pending debt synchronously as an
+  emergency safeguard when the live prompt estimate is already over budget,
+  without turning ordinary threshold debt into foreground latency.
+
+- [#768](https://github.com/Martian-Engineering/lossless-claw/pull/768) [`535f4e2`](https://github.com/Martian-Engineering/lossless-claw/commit/535f4e2b0fcfaa2be7942e74d22ddcf60ee890bb) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Restrict delegated sub-agent retrieval tools to the conversation IDs in their expansion grant. Sub-agents can no longer use `allConversations=true` or an explicit foreign `conversationId` to bypass the grant scope in `lcm_grep`, `lcm_describe`, `lcm_expand`, or `lcm_expand_query`.
+
+- [#805](https://github.com/Martian-Engineering/lossless-claw/pull/805) [`3ef191b`](https://github.com/Martian-Engineering/lossless-claw/commit/3ef191bc3098f66e531c119e6a9e3d5948d82e05) Thanks [@jalehman](https://github.com/jalehman)! - Mark engine emergency fallback summaries with the normal fallback marker and teach `/lossless doctor` to flag legacy unmarked emergency truncation summaries for repair.
+
+- [#801](https://github.com/Martian-Engineering/lossless-claw/pull/801) [`3740efa`](https://github.com/Martian-Engineering/lossless-claw/commit/3740efa3795e024030539d8cfc1c7006e6c645b2) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Escape assembled summary XML content and identifiers so persisted summary text cannot break out of the untrusted historical context wrapper.
+
+- [#792](https://github.com/Martian-Engineering/lossless-claw/pull/792) [`9cd6630`](https://github.com/Martian-Engineering/lossless-claw/commit/9cd66306c3fde49ddfc3ea23065b35c0200a98ff) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Fail closed when a stable session key resumes under a new runtime session and transcript while the prior tracked transcript still exists.
+
+- [#787](https://github.com/Martian-Engineering/lossless-claw/pull/787) [`71bf277`](https://github.com/Martian-Engineering/lossless-claw/commit/71bf277713d7ae7eb346738d43bc2b3c9122deb2) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Skip leaked OpenClaw runtime context assistant messages before LCM persistence.
+
+- [#785](https://github.com/Martian-Engineering/lossless-claw/pull/785) [`9f5c1aa`](https://github.com/Martian-Engineering/lossless-claw/commit/9f5c1aa725b1e800e53b1f89781b9accac18e0a9) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Document and test bounded LCM bootstrap behavior for forked child transcripts, and advertise the host thread-bootstrap projection requirement for subagent forks.
+
+- [#137](https://github.com/Martian-Engineering/lossless-claw/pull/137) [`ed88b09`](https://github.com/Martian-Engineering/lossless-claw/commit/ed88b094c259cb5b7adfb4276cf0278d8f73be85) Thanks [@hhe48203-ctrl](https://github.com/hhe48203-ctrl)! - Harden summarization and assembly against prompt-injection persistence (issue [#71](https://github.com/Martian-Engineering/lossless-claw/issues/71)).
+
+  Injected directives embedded in conversation history could survive compaction and be
+  replayed in later turns. This change defends the content layer end to end:
+
+  - The summarizer system prompt no longer instructs the model to "follow user
+    instructions exactly"; it now treats all conversation text as untrusted data and
+    must strip embedded directives, role reassignments, and behavioral overrides.
+  - Every leaf/condensed summarization prompt (D1/D2/D3+) marks its input as
+    UNTRUSTED DATA so the summarizer extracts facts without obeying embedded
+    instructions.
+  - Assembled summaries carry a `trust="untrusted"` taint label on the `<summary>`
+    tag, and the runtime recall system prompt tells the model not to follow any
+    instructions found within summary content.
+
+  Summaries are still reinserted with the `user` role. Downgrading the role
+  (issue [#71](https://github.com/Martian-Engineering/lossless-claw/issues/71) recommendation 1) requires OpenClaw upstream support — `toolResult`
+  is dropped by tool-result pairing sanitation and `assistant` risks provider
+  first-message/alternation constraints — and is tracked as follow-up.
+
+- [#814](https://github.com/Martian-Engineering/lossless-claw/pull/814) [`0fd64a4`](https://github.com/Martian-Engineering/lossless-claw/commit/0fd64a456ea997929ced1383ac5e3a06de966cf4) Thanks [@jalehman](https://github.com/jalehman)! - Isolate cron scheduler runs that reuse a stable session key so prior run transcripts do not enter the new run's LCM context.
+
+- [#812](https://github.com/Martian-Engineering/lossless-claw/pull/812) [`7e7d449`](https://github.com/Martian-Engineering/lossless-claw/commit/7e7d44960290fddc51659619e6125298b80632f8) Thanks [@tadad](https://github.com/tadad)! - Include conversation IDs on each `lcm_grep` message and summary result so agents can disambiguate global recall hits.
+
+- [#765](https://github.com/Martian-Engineering/lossless-claw/pull/765) [`5102518`](https://github.com/Martian-Engineering/lossless-claw/commit/5102518891cd0cb8ed4725c1ab5d2dfdc8280738) Thanks [@vincentkoc](https://github.com/vincentkoc)! - Improve post-rotate recall by surfacing prompt-matched raw memory snippets when active summaries omit exact recall keys.
+
+- [#790](https://github.com/Martian-Engineering/lossless-claw/pull/790) [`1f688c6`](https://github.com/Martian-Engineering/lossless-claw/commit/1f688c60de16169cddf7b0fb68df0a872070e118) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Preserve assistant top-level `reasoning_content` during LCM ingest and replay,
+  including tool-call-only assistant messages from Kimi/DeepSeek-style thinking
+  providers. The field is restored as top-level assistant metadata, kept out of
+  visible `content` blocks and compaction summarizer input, and still included in
+  token accounting.
+
+- [#813](https://github.com/Martian-Engineering/lossless-claw/pull/813) [`a4b5fa0`](https://github.com/Martian-Engineering/lossless-claw/commit/a4b5fa067f200776f3b495f04df7271288fca11d) Thanks [@jalehman](https://github.com/jalehman)! - Skip Lossless runtime startup work during OpenClaw CLI metadata registration so help and JSON inspection commands do not emit misleading runtime LLM warnings.
+
+- [#770](https://github.com/Martian-Engineering/lossless-claw/pull/770) [`191568a`](https://github.com/Martian-Engineering/lossless-claw/commit/191568af9b905434cf46cc7d35b6b9d0c1822c38) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Normalize ChatCompletion-style summarizer responses from reasoning-capable providers by reading `choices[].message.content` without storing or logging reasoning/thinking fields as summary text.
+
+- [#802](https://github.com/Martian-Engineering/lossless-claw/pull/802) [`b7c44da`](https://github.com/Martian-Engineering/lossless-claw/commit/b7c44dabfd37a22ec7167ea1aee7beda53f8f5e5) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Backfill release-note coverage for recent safety and reliability fixes that shipped without individual changesets.
+
+  This release includes additional hardening for threshold raw-backlog projection, hot-maintenance assembly degradation, OpenClaw context-engine compatibility checks, doctor apply preflight safety, archived conversation reattachment avoidance, rotate/reconcile idempotency, and prompt-recall behavior after transcript rotation.
+
+- [#767](https://github.com/Martian-Engineering/lossless-claw/pull/767) [`5dd0353`](https://github.com/Martian-Engineering/lossless-claw/commit/5dd0353536588054038a0c4d9c81a03628964663) Thanks [@jalehman](https://github.com/jalehman)! - Force leaf-only compaction for raw context outside the preserved fresh tail before rotating session transcripts.
+
+- [#804](https://github.com/Martian-Engineering/lossless-claw/pull/804) [`3c49ae5`](https://github.com/Martian-Engineering/lossless-claw/commit/3c49ae5c0ab560e4c2b146b20c3da180c2b011cc) Thanks [@jalehman](https://github.com/jalehman)! - Use live runtime model context or stored compaction telemetry when rotate summarizes raw context before rewriting transcripts, avoiding emergency truncation when no explicit summary model is configured.
+
+- [#761](https://github.com/Martian-Engineering/lossless-claw/pull/761) [`640a0a8`](https://github.com/Martian-Engineering/lossless-claw/commit/640a0a869c8b2b172257ed8edcf3b19ba325cc8b) Thanks [@jalehman](https://github.com/jalehman)! - Defer runtime auto-rotate JSONL rewrites out of `afterTurn` and `maintain` so embedded prompt-lock fences are not tripped during tool-call loops. Runtime checks now log a deferral to startup/manual rotation unless OpenClaw provides a host-owned full-transcript rewrite primitive. Transcript GC waits for host-approved background maintenance before invoking `rewriteTranscriptEntries`.
+
+- [#800](https://github.com/Martian-Engineering/lossless-claw/pull/800) [`cd79ae5`](https://github.com/Martian-Engineering/lossless-claw/commit/cd79ae52544872bf9da0d14d8458653d2d246d4b) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Sanitize deterministic emergency fallback summaries so directive-shaped untrusted content is not persisted when model-backed summarization is unavailable or cannot produce a smaller summary.
+
+- [#783](https://github.com/Martian-Engineering/lossless-claw/pull/783) [`cd6822f`](https://github.com/Martian-Engineering/lossless-claw/commit/cd6822f49076af31b6148ee14565a74fc9e355cb) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Allow LCM SQLite handles to explicitly enable extension loading for sqlite-vec on node:sqlite hosts.
+
+- [#757](https://github.com/Martian-Engineering/lossless-claw/pull/757) [`718e799`](https://github.com/Martian-Engineering/lossless-claw/commit/718e7998546aa2ba8ac1819b08dcf1ee04a5e6fd) Thanks [@dr00-eth](https://github.com/dr00-eth)! - Rotate stale active conversations before assemble/afterTurn when a stable session key resumes after its tracked transcript file was pruned.
+
+- [#784](https://github.com/Martian-Engineering/lossless-claw/pull/784) [`d3179b2`](https://github.com/Martian-Engineering/lossless-claw/commit/d3179b22f8ca2cb934f7866013bcecb03668e20f) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Strip stale foreign thinking signatures from DB-sourced thinking blocks during assembly.
+
+## 0.11.3
+
+### Patch Changes
+
+- [#740](https://github.com/Martian-Engineering/lossless-claw/pull/740) [`6ecc595`](https://github.com/Martian-Engineering/lossless-claw/commit/6ecc595165c43d7639edabb22efd40297043d416) Thanks [@jalehman](https://github.com/jalehman)! - Declare the OpenClaw context-engine host capability requirement so unsupported CLI harnesses fail with a descriptive error.
+
+- [#750](https://github.com/Martian-Engineering/lossless-claw/pull/750) [`f517e95`](https://github.com/Martian-Engineering/lossless-claw/commit/f517e9544b57c0ce9bb5420a7a9bb95244149fae) Thanks [@jalehman](https://github.com/jalehman)! - Forward host runtime auth profile context through Lossless summary and doctor repair calls.
+
+## 0.11.2
+
+### Patch Changes
+
+- [#714](https://github.com/Martian-Engineering/lossless-claw/pull/714) [`561b275`](https://github.com/Martian-Engineering/lossless-claw/commit/561b27562e318f3b6c8daa3f8011d836d75d13a4) Thanks [@jalehman](https://github.com/jalehman)! - Remove a stale stable-orphan invalidation call from afterTurn placeholder-checkpoint recovery. Stable orphan stripping was removed with the cache-state-dependent assembly path, but the placeholder recovery branch still referenced the deleted method and could throw `clearStableOrphanStrippingOrdinal is not a function` during transcript reconcile.
+
+- [#712](https://github.com/Martian-Engineering/lossless-claw/pull/712) [`67b7f51`](https://github.com/Martian-Engineering/lossless-claw/commit/67b7f515eb66d662b7b0e85fe4aa49dfcd56b83c) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Bound `compactFullSweep` so a single compaction cannot hang the agent turn. The leaf/condensed pass loop now stops at a hard iteration cap (`maxSweepIterations`, default 12) and a wall-clock deadline (`sweepDeadlineMs`, default 120000), returning the consistent partial result instead of running unbounded passes. The sweep also yields the Node event loop between its synchronous `node:sqlite` scans so a long sweep cannot freeze the gateway for its whole duration. Both limits are configurable via plugin config or `LCM_MAX_SWEEP_ITERATIONS` / `LCM_SWEEP_DEADLINE_MS`.
+
+  Also bound the whole `compactUntilUnder` overflow-recovery operation. It runs up to `maxRounds` sweeps, and each sweep re-arms its own `sweepDeadlineMs`, so without an operation-wide budget the worst case was `maxRounds × sweepDeadlineMs` (~20 minutes at the defaults). `compactUntilUnder` now computes one wall-clock deadline (`compactUntilUnderDeadlineMs`, default 300000), shares it into every round's sweep so a sweep stops at whichever deadline is sooner, and checks it before starting the next round — returning the consistent partial result on expiry. Configurable via plugin config or `LCM_COMPACT_UNTIL_UNDER_DEADLINE_MS`.
+
+- [#717](https://github.com/Martian-Engineering/lossless-claw/pull/717) [`23c91d5`](https://github.com/Martian-Engineering/lossless-claw/commit/23c91d57643bd54005e802693ec7bbb13343f0e9) Thanks [@jalehman](https://github.com/jalehman)! - Advertise and honor a longer `lcm_expand_query` dynamic tool timeout so delegated recall does not outlive OpenClaw's tool RPC watchdog.
+
+- [#672](https://github.com/Martian-Engineering/lossless-claw/pull/672) [`7741606`](https://github.com/Martian-Engineering/lossless-claw/commit/7741606957597d03c82be1e4da91b197bdad07e6) Thanks [@holgergruenhagen](https://github.com/holgergruenhagen)! - Shorten the `/lossless` native command description so Discord no longer truncates it during command registration.
+
+## 0.11.1
+
+### Patch Changes
+
+- [#709](https://github.com/Martian-Engineering/lossless-claw/pull/709) [`78697ce`](https://github.com/Martian-Engineering/lossless-claw/commit/78697ced6be0922f7173cfb3fe0d6638416b9f95) Thanks [@jalehman](https://github.com/jalehman)! - Keep generated focus briefs usable when they are shorter than the target length, surfacing a warning instead of failing the command after generation.
+
+## 0.11.0
+
+### Minor Changes
+
+- [#692](https://github.com/Martian-Engineering/lossless-claw/pull/692) [`a13905a`](https://github.com/Martian-Engineering/lossless-claw/commit/a13905a832bfe843de472cb408222bed1b5f8ca7) Thanks [@jalehman](https://github.com/jalehman)! - Add focus brief generation through `/lossless focus <prompt>`, active focus overlays, unfocus/refocus lifecycle handling, and TUI/status diagnostics for generated briefs.
+
+### Patch Changes
+
+- [#688](https://github.com/Martian-Engineering/lossless-claw/pull/688) [`d1bef05`](https://github.com/Martian-Engineering/lossless-claw/commit/d1bef053326bd65e2736889ef4fa916f6e8bf1ec) Thanks [@jetd1](https://github.com/jetd1)! - Preserve unpersisted OpenClaw inter-session live input when assembling context from LCM's durable DB frontier.
+
+- [#685](https://github.com/Martian-Engineering/lossless-claw/pull/685) [`a6640b6`](https://github.com/Martian-Engineering/lossless-claw/commit/a6640b648fc87d895b94ee277a9218a1f4a735a8) Thanks [@jetd1](https://github.com/jetd1)! - Seed a placeholder `conversation_bootstrap_state` row in the afterTurn slow-path stat-fail branch so the next turn can recover.
+
+  `[#649](https://github.com/Martian-Engineering/lossless-claw/issues/649)` added a stat-fail fallback that returns `hasOverlap:true` to permit live `afterTurn` persistence even when `stat(sessionFile)` fails, expecting the subsequent `refreshAfterTurnBootstrapState` hook to refresh the checkpoint. That hook calls `refreshBootstrapState`, which independently calls `stat(sessionFile)` and throws on failure, so the catch block in the hook swallows the error and `conversation_bootstrap_state` stays `NULL`. Every subsequent `afterTurn` then re-enters the slow path with `reason="checkpoint-missing"`, which is intentionally excluded from `allowNoAnchorImport`, and the conversation gets stuck: LCM degrades into a transparent passthrough where the assemble safe-fallback returns `params.messages` verbatim and compaction never runs.
+
+  This restores the contract that "permissive return ⟹ checkpoint exists" without re-introducing the unconditional refresh `[#649](https://github.com/Martian-Engineering/lossless-claw/issues/649)` deliberately removed. The placeholder is written via `summaryStore.upsertConversationBootstrapState` directly so it does not depend on stat success. Subsequent turns recover from offset=0 once the transcript becomes statable, but route that placeholder recovery through the existing DB-anchor reconciliation path so already-persisted live afterTurn messages are not replayed as new rows.
+
+- [#704](https://github.com/Martian-Engineering/lossless-claw/pull/704) [`f806bb9`](https://github.com/Martian-Engineering/lossless-claw/commit/f806bb9691dd58fd6e19c70091cef9ba0f001718) Thanks [@jalehman](https://github.com/jalehman)! - Declare OpenClaw 2026.5.12 as the minimum supported host version for runtime LLM summarization.
+
+- [#696](https://github.com/Martian-Engineering/lossless-claw/pull/696) [`1869c6c`](https://github.com/Martian-Engineering/lossless-claw/commit/1869c6c574e02e54ae1d69f94263e374de06234b) Thanks [@jalehman](https://github.com/jalehman)! - Mark OpenClaw as an optional peer dependency so standalone plugin installs do not pull a second OpenClaw runtime tree.
+
+- [#573](https://github.com/Martian-Engineering/lossless-claw/pull/573) [`5621e8f`](https://github.com/Martian-Engineering/lossless-claw/commit/5621e8f2f37c0f5f9ee68e2334d6ab43d3887a06) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Generalize the native-image-block externalizer to assistant, system, tool, and toolResult messages. PR [#521](https://github.com/Martian-Engineering/lossless-claw/issues/521) in v0.9.3 only ran on user-role messages, so:
+
+  - Assistant or system messages carrying native `{type:"image", data:...}` blocks fell through to the generic raw-payload externalizer and were stored as `raw-{role}-payload.json` blobs with embedded base64 instead of dedupe-friendly image files.
+  - Tool and toolResult messages (which skip raw-payload externalization entirely) had their image blocks persisted inline through the standard `message_parts` pipeline, embedding base64 directly in the DB row.
+
+  In both cases the result was the same: no large*file row, no `lcm_describe` rendering, and no inter-conversation dedupe. The interceptor now runs for every persistable role, replacing native image blocks with `[<Role> image: ... | LCM file: file*…]` references and storing the image file once.
+
+  `interceptLargeRawPayload` also no longer skips externalization based on a content substring match (`isExternalizedReferenceContent`); it now only skips when the message already carries the explicit `rawPayloadExternalized: true` flag, so a still-oversized message that merely embeds an image reference alongside other content is still externalized.
+
+  Extension map: added `image/heic`, `image/avif`, and `image/bmp` so MIME-detection misses for those formats produce a sensible filename.
+
+- [#706](https://github.com/Martian-Engineering/lossless-claw/pull/706) [`f1e1806`](https://github.com/Martian-Engineering/lossless-claw/commit/f1e1806adb23e8d6f70ad9250001f663326b3ffd) Thanks [@jalehman](https://github.com/jalehman)! - Block same-path-shrink no-anchor bootstrap imports when candidate raw event IDs already belong to another active conversation.
+
+## 0.10.0
+
+### Minor Changes
+
+- [#338](https://github.com/Martian-Engineering/lossless-claw/pull/338) [`a05b9e4`](https://github.com/Martian-Engineering/lossless-claw/commit/a05b9e4c83a21c22e9279f66e848e84eed389fe8) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Search and expansion tools now treat rotated conversation segments that share a stable session identity as one recall scope by default.
+
+### Patch Changes
+
+- [#631](https://github.com/Martian-Engineering/lossless-claw/pull/631) [`b6568da`](https://github.com/Martian-Engineering/lossless-claw/commit/b6568daa91cea86c043ba6da34623f4b564f09ee) Thanks [@jalehman](https://github.com/jalehman)! - Disable SQLite backups during automatic session-file rotation by default. Set `autoRotateSessionFiles.createBackups` to `true` to keep automatic runtime and startup rotation creating the rolling `rotate-latest` backup; manual `/lcm rotate` still creates that backup by default.
+
+- [#640](https://github.com/Martian-Engineering/lossless-claw/pull/640) [`85ba63d`](https://github.com/Martian-Engineering/lossless-claw/commit/85ba63d2d70d9e4fb74d1f304a94bc36063d544d) Thanks [@0xopaque](https://github.com/0xopaque)! - Prevent existing-conversation bootstrap from replaying prior transcript rows as fresh LCM messages. Bootstrap append/reconcile now filters replay-shaped tails, message writes reject same-timestamp prior-content floods, and ingest batches run transactionally.
+
+- [#661](https://github.com/Martian-Engineering/lossless-claw/pull/661) [`4f78d92`](https://github.com/Martian-Engineering/lossless-claw/commit/4f78d9226a188c6fef1f03b06c03d525fac446bf) Thanks [@jalehman](https://github.com/jalehman)! - Preserve hot prompt-cache deferral for direct OpenAI GPT models and raise the default critical budget pressure ratio to 0.90 so normal threshold compaction does not immediately bypass cache protection.
+
+- [#622](https://github.com/Martian-Engineering/lossless-claw/pull/622) [`36c47d1`](https://github.com/Martian-Engineering/lossless-claw/commit/36c47d1dbfd98258912e0bc883be703afc024ca6) Thanks [@jalehman](https://github.com/jalehman)! - Treat existing `cold-cache-catchup` compaction debt as legacy threshold work. Background, assemble, and host-approved maintain drains now revalidate old non-threshold debt against `contextThreshold`, run a threshold full sweep when still needed, or clear the debt when the conversation is already under threshold.
+
+- [#621](https://github.com/Martian-Engineering/lossless-claw/pull/621) [`a81bb34`](https://github.com/Martian-Engineering/lossless-claw/commit/a81bb34b869b4b3d1e0d52d248a499be7d45c3e5) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Fix `afterTurn` skipping compaction evaluation when `ingestBatch` is empty. When `deduplicateAfterTurnBatch` removed every new message (e.g. because `afterTurnTranscriptReconcile` or per-message `engine.ingest` calls had already imported them), `afterTurn` would early-return before reaching the compaction policy block. Long-running conversations could accumulate well beyond `contextThreshold` without ever triggering threshold compaction, deferred-compaction debt, or budget-trigger recovery — leaving the host's emergency overflow truncation as the only safety net. The early-return is now replaced with a fall-through: when `ingestBatch` is empty the actual `ingestBatch` call is skipped, but token-budget resolution, conversation lookup, and the existing compaction evaluation flow still run. This is observable in the `[lcm] afterTurn: nothing to ingest …` log line, which now ends with `(continuing to compaction evaluation; transcript reconcile may have already ingested)`.
+
+- [#691](https://github.com/Martian-Engineering/lossless-claw/pull/691) [`9737eac`](https://github.com/Martian-Engineering/lossless-claw/commit/9737eac67c2663031af0e9c78a78955cd7de6db0) Thanks [@jalehman](https://github.com/jalehman)! - Advertise context-engine thread bootstrap projection epochs from DB-backed assembly so hosts can avoid reinjecting Lossless context every turn.
+
+- [#606](https://github.com/Martian-Engineering/lossless-claw/pull/606) [`0cdb664`](https://github.com/Martian-Engineering/lossless-claw/commit/0cdb664920e456b564ee081d7e60b2d8d0cd5644) Thanks [@castaples](https://github.com/castaples)! - Fix Bedrock `messages.0 is empty` validation rejection by extending the assemble pass's empty-content filter to cover `user` and `toolResult` roles, not only `assistant`. Previously an empty content array briefly produced upstream could survive the cleaned-tail filter and be sent to Bedrock Converse, which rejects it with `The content field in the Message object at messages.N is empty. Add a ContentBlock object to the content field and try again.` The new unified `isEmptyMessageContent` helper drops empty-array, empty-string, null, and undefined content for any role while preserving the existing assistant-only thinking-only / blank-text guards.
+
+- [#691](https://github.com/Martian-Engineering/lossless-claw/pull/691) [`9737eac`](https://github.com/Martian-Engineering/lossless-claw/commit/9737eac67c2663031af0e9c78a78955cd7de6db0) Thanks [@jalehman](https://github.com/jalehman)! - Run threshold full-sweep leaf compaction until eligible raw history is exhausted, and only trigger condensation from summarized-prefix pressure.
+
+- [#634](https://github.com/Martian-Engineering/lossless-claw/pull/634) [`8ad543b`](https://github.com/Martian-Engineering/lossless-claw/commit/8ad543be90bc10211d8e4dacb3a60d81d7286fa2) Thanks [@jalehman](https://github.com/jalehman)! - Keep lcm_describe tool result details compact so OpenClaw post-processing middleware accepts large summary descriptions.
+
+- [#670](https://github.com/Martian-Engineering/lossless-claw/pull/670) [`7f3285c`](https://github.com/Martian-Engineering/lossless-claw/commit/7f3285c642faecb5e90680a7f567439cda52f0d5) Thanks [@jalehman](https://github.com/jalehman)! - Reject obvious regex syntax in `lcm_grep` full-text mode with a helpful error and clarify regex-vs-FTS routing guidance.
+
+- [#637](https://github.com/Martian-Engineering/lossless-claw/pull/637) [`6303ec2`](https://github.com/Martian-Engineering/lossless-claw/commit/6303ec23a4a42dc22167f5d26fe47a64a98029dd) Thanks [@NePav](https://github.com/NePav)! - Move the PI runtime packages to the new `@earendil-works/*` scope and install `@earendil-works/pi-agent-core`, `@earendil-works/pi-ai`, and `@earendil-works/pi-coding-agent` as runtime `dependencies`. The plugin's bundled `dist/index.js` imports these unconditionally (build externalizes the PI scope), so absence becomes a hard `ERR_MODULE_NOT_FOUND` at module load. Treating them as runtime dependencies makes the plugin self-contained on `npm install` and removes the host-symlink workaround currently required on fresh OpenClaw installs.
+
+  Fixes [#636](https://github.com/Martian-Engineering/lossless-claw/issues/636).
+
+- [#633](https://github.com/Martian-Engineering/lossless-claw/pull/633) [`e665a0e`](https://github.com/Martian-Engineering/lossless-claw/commit/e665a0effd2419ab75a0156b8d8f65e9c3f72046) Thanks [@jalehman](https://github.com/jalehman)! - Register explicit plugin tool runtime names so cached tool descriptors can execute every lcm\_\* tool on newer OpenClaw releases.
+
+- [#632](https://github.com/Martian-Engineering/lossless-claw/pull/632) [`16dafb5`](https://github.com/Martian-Engineering/lossless-claw/commit/16dafb5c39acd95aec92f53b4dc030648bf32227) Thanks [@jalehman](https://github.com/jalehman)! - Reduce routine LCM log noise by moving debugging-oriented diagnostics to debug level.
+
+- [#657](https://github.com/Martian-Engineering/lossless-claw/pull/657) [`56ad047`](https://github.com/Martian-Engineering/lossless-claw/commit/56ad0478f9fd477a8051bf80c01dfaca2ca46762) Thanks [@jalehman](https://github.com/jalehman)! - Preserve active conversation history when OpenClaw emits `session_end` for gateway `restart` or `shutdown` lifecycle events.
+
+- [#689](https://github.com/Martian-Engineering/lossless-claw/pull/689) [`5bd5292`](https://github.com/Martian-Engineering/lossless-claw/commit/5bd5292740a06eb102faacbe5ab883ed835ab3e6) Thanks [@abnershang](https://github.com/abnershang)! - Use OpenClaw's current runtime config snapshot API to avoid the deprecated plugin `config.loadConfig()` warning on newer hosts.
+
+- [#600](https://github.com/Martian-Engineering/lossless-claw/pull/600) [`fcd013a`](https://github.com/Martian-Engineering/lossless-claw/commit/fcd013a9d44eac3a1451a7fd2858e8982f0f7629) Thanks [@jalehman](https://github.com/jalehman)! - Add OpenClaw runtime LLM policy migration support for configured Lossless summary models.
+
+- [#691](https://github.com/Martian-Engineering/lossless-claw/pull/691) [`9737eac`](https://github.com/Martian-Engineering/lossless-claw/commit/9737eac67c2663031af0e9c78a78955cd7de6db0) Thanks [@jalehman](https://github.com/jalehman)! - Account for runtime prompt overhead when threshold compaction is triggered from an observed token count. Lossless now compares Codex's live prompt count against its persisted context count and compacts far enough to cover the observed gap instead of clearing threshold debt while the live prompt may still be over target.
+
+- [#659](https://github.com/Martian-Engineering/lossless-claw/pull/659) [`2f07cfb`](https://github.com/Martian-Engineering/lossless-claw/commit/2f07cfb00c07fbfed756e1462d0de58ff97162a9) Thanks [@jetd1](https://github.com/jetd1)! - Recover bounded transcript epochs when OpenClaw rewrites a session JSONL in place and the stored bootstrap checkpoint points past the new file end. LCM now treats same-path transcript shrink as an epoch rollover instead of accepting an empty append-only read as fully covered.
+
+- [#651](https://github.com/Martian-Engineering/lossless-claw/pull/651) [`bc66b3e`](https://github.com/Martian-Engineering/lossless-claw/commit/bc66b3e0992e3342507f6064466d3eeeb3bda2fe) Thanks [@copilot-swe-agent](https://github.com/apps/copilot-swe-agent)! - Recover stale session token totals after gateway restart without replacing already-fresh runtime totals.
+
+- [#691](https://github.com/Martian-Engineering/lossless-claw/pull/691) [`9737eac`](https://github.com/Martian-Engineering/lossless-claw/commit/9737eac67c2663031af0e9c78a78955cd7de6db0) Thanks [@jalehman](https://github.com/jalehman)! - Fix leaf compaction, TUI previews, and TUI rewrite sources for structured message-part rows whose stored message content is empty.
+
+- [#628](https://github.com/Martian-Engineering/lossless-claw/pull/628) [`13780e9`](https://github.com/Martian-Engineering/lossless-claw/commit/13780e9abce22a2c0b47dba9447d1d867e55ef52) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Fix v4.2 stub-tier drilldown fallback for migrated tool payloads, align the migration script's default storage directory with runtime state-dir config, and repair `--revert --dry-run`.
+
+- [#681](https://github.com/Martian-Engineering/lossless-claw/pull/681) [`554b8c6`](https://github.com/Martian-Engineering/lossless-claw/commit/554b8c6a3b3a1653f4202ffa6fbdf6ef35f72d79) Thanks [@jalehman](https://github.com/jalehman)! - Switch automatic compaction to threshold-triggered full sweeps and retire cache-aware incremental scheduling while keeping the existing 20k default leaf chunk size. Adds `sweepMaxDepth` as the preferred depth knob, keeps `incrementalMaxDepth` as a deprecated alias, and adds `summaryPrefixTargetTokens` so pressure sweeps can condense deeper when summarized context remains too large.
+
+- [#649](https://github.com/Martian-Engineering/lossless-claw/pull/649) [`84ed96e`](https://github.com/Martian-Engineering/lossless-claw/commit/84ed96e8b600bfc987fffb82397b70f06b2a49ac) Thanks [@jetd1](https://github.com/jetd1)! - Preserve continuity when OpenClaw switches to a new transcript file for an existing session key. LCM now treats a bounded, path-mismatched transcript with no old anchor as a new transcript epoch, imports its recoverable messages, and avoids advancing checkpoints for no-anchor reads that imported nothing.
+
+- [#652](https://github.com/Martian-Engineering/lossless-claw/pull/652) [`93f9336`](https://github.com/Martian-Engineering/lossless-claw/commit/93f9336a681849399a6cc19917d97730f9e4ca01) Thanks [@jalehman](https://github.com/jalehman)! - Repair delayed tool-result pairing when display-only assistant progress turns appear between the original assistant tool call and its result, and avoid replay-guard false positives while bootstrapping legitimate repeated transcript messages.
+
+## 0.9.4
+
+### Patch Changes
+
+- [#591](https://github.com/Martian-Engineering/lossless-claw/pull/591) [`f9a5164`](https://github.com/Martian-Engineering/lossless-claw/commit/f9a5164c82f0973a0474396f77a06b210d129f79) Thanks [@coolmanns](https://github.com/coolmanns)! - Fail closed when oversized afterTurn dedup batches have no overlap with the stored LCM tail, preventing short stale runtime snapshots from being imported as fresh duplicate rows.
+
+- [#592](https://github.com/Martian-Engineering/lossless-claw/pull/592) [`e0dbd09`](https://github.com/Martian-Engineering/lossless-claw/commit/e0dbd097bf7ab3116a258b9a13153bd2d682e44f) Thanks [@jalehman](https://github.com/jalehman)! - Automatically rotate oversized LCM-managed session JSONL files by default, with backup-backed rotation, active-session guardrails, startup scans limited to indexed OpenClaw session stores, one startup batch backup, and structured `[lcm] auto-rotate:` summary/detail logs for frequency and byte-savings telemetry.
+
+- [#572](https://github.com/Martian-Engineering/lossless-claw/pull/572) [`1b9ba0c`](https://github.com/Martian-Engineering/lossless-claw/commit/1b9ba0ca1b6cea0d87031e7772fbf1a4225f8978) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Fix v0.9.3 regressions affecting prefill safety and provider routing:
+
+  - Restore the reference-inequality contract on the no-user-turn assemble fallback. PR [#502](https://github.com/Martian-Engineering/lossless-claw/issues/502)'s guard returned `params.messages` by reference, defeating the `installContextEngineLoopHook` `assembled.messages !== sourceMessages` check installed by PR [#504](https://github.com/Martian-Engineering/lossless-claw/issues/504); the guard now uses the same `safeFallback()` helper as the other fallback paths so the gateway treats the result as assembled context.
+  - Strip assistant messages whose only blocks are blank text (`[{type:"text", text:""}]`) during assembly, complementing the existing thinking-only filter so Bedrock no longer rejects with `The text field in the ContentBlock object at messages.N.content.0 is blank`.
+  - Stop redirecting paid OpenAI API-key Codex users from `https://api.openai.com/v1` to `https://chatgpt.com/backend-api/codex`. `shouldUseNativeCodexBaseUrl` now respects an explicitly-configured baseUrl; the rewrite still applies when baseUrl is empty or already a ChatGPT Codex variant.
+  - Remove the silent `http://localhost:11434` ollama fallback in `inferBaseUrlFromProvider` so cloud-only ollama configs (`https://ollama.com`) and self-hosted setups must be explicit; the prior default would silently route cloud configs to localhost.
+
+- [#574](https://github.com/Martian-Engineering/lossless-claw/pull/574) [`f986c29`](https://github.com/Martian-Engineering/lossless-claw/commit/f986c29ca961e9d878a897e42d5f187ced182bd9) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Tighten packaging guards to prevent the silent-load failure mode [#555](https://github.com/Martian-Engineering/lossless-claw/issues/555) fixed:
+
+  - Add `test/manifest.test.ts` that asserts `openclaw.plugin.json#contracts.tools` matches the canonical `name:` fields exported by `src/tools/lcm-*-tool.ts` (discovered dynamically via directory scan, no hard-coded list) and the `registerTool` call sites in `src/plugin/index.ts` (matcher tolerates both arrow-expression and arrow-block bodies). Catches drift the next time a tool is added or renamed without a manifest update.
+  - Tighten `peerDependencies` for `@mariozechner/pi-*` from `*` to `>=0.66 <1`, and `openclaw` from `*` to `>=2026.2.17 <2026.6.0`, so the next major silently mismatches at install-time rather than at runtime.
+  - Add an upper bound (`<2026.6.0`) and a `tested: ["2026.5.2"]` array to `package.json#openclaw.compat`, so `openclaw plugins doctor` can flag known-incompatible host versions.
+  - Add a CI smoke job that builds the bundle, installs `openclaw@latest` alongside, and verifies the bundle still imports cleanly with a callable `register` export. (A deeper smoke that drives `plugin.register(...)` against a stub api turned out to require more host-runtime fixture than is reasonable to maintain in CI; the deeper "register against the real openclaw plugin loader" check is followup work — see [#555](https://github.com/Martian-Engineering/lossless-claw/issues/555) for the regression class that would warrant it.)
+  - The Windows installer's hook-pack detector ([#451](https://github.com/Martian-Engineering/lossless-claw/issues/451)) already saw `kind: "context-engine"` in the manifest; this is now covered by an explicit assertion in the manifest drift test.
+
+  Closes [#570](https://github.com/Martian-Engineering/lossless-claw/issues/570).
+
+- [#576](https://github.com/Martian-Engineering/lossless-claw/pull/576) [`9f55419`](https://github.com/Martian-Engineering/lossless-claw/commit/9f554194fe04f6e002da3aeab611e893fa92a790) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Harden the afterTurn-lane robustness:
+
+  - `scheduleDeferredCompactionDebtDrain` no longer silently skips when `compactionTelemetry` lacks provider/model — CLI-backend sessions ([#472](https://github.com/Martian-Engineering/lossless-claw/issues/472)) accumulated debt forever. Now drains anyway when telemetry is missing (let the inner cache-aware gate decide), keeping silent debt off the floor. The visibility log is deduped to once per conversation per process so long-running CLI sessions don't spam every afterTurn.
+  - `messageContentCoveredBySummary` (PR [#551](https://github.com/Martian-Engineering/lossless-claw/issues/551)) replaces bare substring match with anchored-or-quoted matching — a 24+ char user instruction coincidentally appearing inside a long narrative summary is no longer silently dropped. The quote-span scan is also more resilient: an unmatched opening quote skips past instead of aborting the entire scan, so later well-formed quoted spans still get checked.
+  - `reconcileTranscriptTailForAfterTurn` (PR [#551](https://github.com/Martian-Engineering/lossless-claw/issues/551)) slow path no longer blindly re-reads the full session file when checkpoint is missing or path mismatched — refresh checkpoint and switch to incremental reads, with a one-shot warn for visibility. The dedupe set is bounded with FIFO eviction at 4096 entries so hosts churning through many sessions don't accumulate it indefinitely. The empty-`historicalMessages` branch now distinguishes "actually empty file" (size 0 → refresh checkpoint) from "non-empty file but parser failure" (size > 0 → emit warn, skip checkpoint refresh, keep the next afterTurn eligible to retry).
+
+- [#574](https://github.com/Martian-Engineering/lossless-claw/pull/574) [`f986c29`](https://github.com/Martian-Engineering/lossless-claw/commit/f986c29ca961e9d878a897e42d5f187ced182bd9) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Apply ingest protections during bootstrap import — credit to @jalehman for [#510](https://github.com/Martian-Engineering/lossless-claw/pull/510), inadvertently omitted from the v0.9.3 changelog. Bootstrap now routes each imported message through `ingestSingle` so oversized files, images, and tool-results are externalized on first import — peer of [#511](https://github.com/Martian-Engineering/lossless-claw/issues/511) and [#521](https://github.com/Martian-Engineering/lossless-claw/issues/521) which closed [#492](https://github.com/Martian-Engineering/lossless-claw/issues/492). (changesets/changelog-github attributes a changeset to the author of the PR introducing it; this entry exists explicitly to surface @jalehman as the author of [#510](https://github.com/Martian-Engineering/lossless-claw/issues/510) in the next release notes since the original changeset for that PR was never merged.)
+
+- [#593](https://github.com/Martian-Engineering/lossless-claw/pull/593) [`785e467`](https://github.com/Martian-Engineering/lossless-claw/commit/785e467aa03029fb84cc9162f9858b10e42ba18e) Thanks [@jalehman](https://github.com/jalehman)! - Declare startup activation in the OpenClaw plugin manifest so OpenClaw 2026.5.2-era startup/runtime plugin planning loads Lossless Claw before resolving the configured context engine.
+
+## 0.9.3
+
+### Patch Changes
+
+- [#557](https://github.com/Martian-Engineering/lossless-claw/pull/557) [`5a6b11b`](https://github.com/Martian-Engineering/lossless-claw/commit/5a6b11b0a1e1f37a2f095731ed0decad74a70847) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Honor `cacheAwareCompaction.enabled: false` at the deferred-compaction dispatch gate, and add a critical-pressure escape so deferred compaction fires regardless of prompt-cache state when `currentTokenCount >= criticalBudgetPressureRatio * tokenBudget` (default 0.70). Previously, mutation-sensitive providers (Anthropic, Codex, Copilot) could livelock the dispatcher in high-velocity sessions: each turn refreshed `lastCacheTouchAt`, the cache TTL never expired, deferred work never fired, and the runtime emergency overflow handler was left to do all the work. The new escape preserves cache-aware throttling in the 0–70% headroom band while ensuring compaction always fires before overflow.
+
+- [#470](https://github.com/Martian-Engineering/lossless-claw/pull/470) [`8d634cd`](https://github.com/Martian-Engineering/lossless-claw/commit/8d634cdf4b7544c9093c2e701fbbe5075d1e3de6) Thanks [@GodsBoy](https://github.com/GodsBoy)! - Document `lcm-tui` Codex OAuth flows with the explicit `openai-codex` provider so repair, rewrite, doctor, and backfill examples match the new Codex CLI delegate path after `codex login`.
+
+- [#535](https://github.com/Martian-Engineering/lossless-claw/pull/535) [`c8c185b`](https://github.com/Martian-Engineering/lossless-claw/commit/c8c185bb68f768db584c34abfb55b2b578b1b902) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Treat Codex prompt-cache writes and recent cache touches as mutation-sensitive so deferred compaction does not rewrite hot cached prompts before the cache TTL expires.
+
+- [#549](https://github.com/Martian-Engineering/lossless-claw/pull/549) [`d8a7389`](https://github.com/Martian-Engineering/lossless-claw/commit/d8a73890933f2992dc997b0dea6a1e193e364d37) Thanks [@jalehman](https://github.com/jalehman)! - Fix `openai-codex` summarization for modern Codex model ids that are not present in the local `pi-ai` model catalog.
+
+  Lossless now resolves native Codex transport defaults for these models and treats explicit provider error responses as provider failures, allowing configured fallback models to run instead of retrying as an empty summary and falling back to truncation.
+
+- [#513](https://github.com/Martian-Engineering/lossless-claw/pull/513) [`4724d3f`](https://github.com/Martian-Engineering/lossless-claw/commit/4724d3fe6ccfd85f275aad732f3b01551d909e5a) Thanks [@mvanhorn](https://github.com/mvanhorn)! - Correct `lcm_expand_query` source-token accounting guidance for explicit leaf summaries.
+
+- [#555](https://github.com/Martian-Engineering/lossless-claw/pull/555) [`4ea5a99`](https://github.com/Martian-Engineering/lossless-claw/commit/4ea5a99769238143e4a62c3b8797ffd56dd666c0) Thanks [@jeremyheslop](https://github.com/jeremyheslop)! - Declare `contracts.tools` in `openclaw.plugin.json` so OpenClaw 2026.5.2's stricter loader accepts the plugin's `lcm_grep`, `lcm_describe`, `lcm_expand`, and `lcm_expand_query` registrations. Without this declaration the loader emits `plugin must declare contracts.tools before registering agent tools` and the plugin fails to register, which silently disables compaction (the engine still loads but no tools are wired up).
+
+- [#546](https://github.com/Martian-Engineering/lossless-claw/pull/546) [`a4f7059`](https://github.com/Martian-Engineering/lossless-claw/commit/a4f7059a6e50f75e916f688070d2172043627464) Thanks [@baghvn](https://github.com/baghvn)! - Resolve uncataloged DeepSeek and other known provider models to their expected API family and base URL defaults when OpenClaw model metadata is unavailable.
+
+- [#551](https://github.com/Martian-Engineering/lossless-claw/pull/551) [`acb5643`](https://github.com/Martian-Engineering/lossless-claw/commit/acb5643a4ebd09af3626db1e3f2ce22133314ffd) Thanks [@jalehman](https://github.com/jalehman)! - Reconcile foreground transcript turns before post-turn ingestion so assistant replies cannot be stored without their user prompt.
+
+- [#504](https://github.com/Martian-Engineering/lossless-claw/pull/504) [`7063a1f`](https://github.com/Martian-Engineering/lossless-claw/commit/7063a1f17b7be4cd60fc87563d5dbf9ce125b1c4) Thanks [@EpaL](https://github.com/EpaL)! - Prevent assistant-prefill failures on assemble fallback paths while preserving valid assembled assistant turns.
+
+- [#502](https://github.com/Martian-Engineering/lossless-claw/pull/502) [`74004a4`](https://github.com/Martian-Engineering/lossless-claw/commit/74004a4ef486ba2e351a4143acfb8cb4a7573b6c) Thanks [@copilot-swe-agent](https://github.com/apps/copilot-swe-agent)! - Fix prefill errors on cold-cache new sessions that start with only an assistant greeting.
+
+  When a session begins with an agent greeting before any user message and the Anthropic
+  prompt cache goes cold (>5 min), `assemble()` could return a context containing only
+  the assistant greeting with no user turns. Providers that require conversations to end
+  with a user message would then reject the LLM call, silently dropping the user's first
+  real message.
+
+  `assemble()` now detects when the assembled context contains no user-role messages at
+  all (raw-message-only DB state where every stored message is `assistant` or `toolResult`)
+  and falls back to the live context, which correctly ends with the user's current message.
+  Sessions with compaction summaries are unaffected because summaries are always stored
+  with `role: "user"`.
+
+- [#501](https://github.com/Martian-Engineering/lossless-claw/pull/501) [`ab22632`](https://github.com/Martian-Engineering/lossless-claw/commit/ab2263215877c59738ce3e6d7608274147290aa7) Thanks [@copilot-swe-agent](https://github.com/apps/copilot-swe-agent)! - Move `@mariozechner/pi-agent-core`, `@mariozechner/pi-ai`, and `@mariozechner/pi-coding-agent` from `dependencies` to optional `peerDependencies` so the plugin always resolves them from the host OpenClaw runtime instead of a pinned local copy.
+
+  Previously these packages were pinned as `dependencies` (fixed at `0.66.1`), which caused npm to install a snapshot in the plugin's own `node_modules/`. That snapshot's internal path references (e.g. `provider.runtime-BlZSfz5M.js`) became stale whenever OpenClaw shipped a new build that bumped `pi-*`, breaking plugin registration on `openclaw ≥ 2026.4.20`.
+
+  By declaring them as optional peer dependencies:
+
+  - No local copy is installed (npm v7+ skips optional peer deps when they are not required by the consumer), so the host-provided versions are resolved via normal Node.js module lookup.
+  - The build already marks `@mariozechner/*` as external (`--external:"@mariozechner/*"`), so the runtime was always intended to supply these modules.
+  - `devDependencies` retains the pinned `0.66.1` versions so local builds and tests continue to work without needing a live OpenClaw installation.
+
+- [#551](https://github.com/Martian-Engineering/lossless-claw/pull/551) [`acb5643`](https://github.com/Martian-Engineering/lossless-claw/commit/acb5643a4ebd09af3626db1e3f2ce22133314ffd) Thanks [@jalehman](https://github.com/jalehman)! - Skip afterTurn messages whose content is already covered by an auto-compaction summary, preventing safeguard-mode summary re-injection from duplicating user instructions in LCM context.
+
+- [#482](https://github.com/Martian-Engineering/lossless-claw/pull/482) [`8d6c0a1`](https://github.com/Martian-Engineering/lossless-claw/commit/8d6c0a1202b3079d718c47234c65b56b764abefa) Thanks [@banna-commits](https://github.com/banna-commits)! - Fix LCM migration recovery when existing databases are missing the `message_parts` table.
+
+- [#500](https://github.com/Martian-Engineering/lossless-claw/pull/500) [`d3a8bae`](https://github.com/Martian-Engineering/lossless-claw/commit/d3a8bae41c8119c76196d9b399950223d2287d6c) Thanks [@Truck0ff](https://github.com/Truck0ff)! - Prefer model-level runtime `api` declarations over provider and catalog API defaults when dispatching LCM summarizer requests.
+
+- [#521](https://github.com/Martian-Engineering/lossless-claw/pull/521) [`791c591`](https://github.com/Martian-Engineering/lossless-claw/commit/791c5916372680336b7c4a310530ad3b3cf5fa91) Thanks [@jalehman](https://github.com/jalehman)! - Externalize native user image blocks as image files before generic raw payload fallback.
+
+- [#527](https://github.com/Martian-Engineering/lossless-claw/pull/527) [`473b90a`](https://github.com/Martian-Engineering/lossless-claw/commit/473b90a618cd8fdd541d953d69414bb69a494b54) Thanks [@vincentkoc](https://github.com/vincentkoc)! - Declare OpenClaw plugin API compatibility metadata and route plugin SDK type imports through the local compatibility bridge.
+
+- [#506](https://github.com/Martian-Engineering/lossless-claw/pull/506) [`2f7b917`](https://github.com/Martian-Engineering/lossless-claw/commit/2f7b917f9a4239c0a4a29b7d23f7eaf7e15bb838) Thanks [@wujiaming88](https://github.com/wujiaming88)! - Prevent replayed Bedrock transcript tails from being reingested after compaction by matching against the actual stored message tail and treating fully matched suffixes as already stored.
+
+- [#511](https://github.com/Martian-Engineering/lossless-claw/pull/511) [`eb59416`](https://github.com/Martian-Engineering/lossless-claw/commit/eb594167366366a9883c49b3cd30bec354da3f94) Thanks [@jalehman](https://github.com/jalehman)! - Externalize oversized raw message payloads into large file records after existing file, image, and tool-result interceptors run.
+
+- [#515](https://github.com/Martian-Engineering/lossless-claw/pull/515) [`1c7b13f`](https://github.com/Martian-Engineering/lossless-claw/commit/1c7b13fcdacace9a9446d357c360fb9d4313c952) Thanks [@SweetSophia](https://github.com/SweetSophia)! - Use runtime prompt token counts for after-turn compaction decisions when OpenClaw provides usage data, falling back to transcript estimates only when runtime counts are unavailable.
+
+- [#507](https://github.com/Martian-Engineering/lossless-claw/pull/507) [`f2574ed`](https://github.com/Martian-Engineering/lossless-claw/commit/f2574ed9585ebba46b3574d9d2541444766cab19) Thanks [@jalehman](https://github.com/jalehman)! - Drain deferred compaction debt only after foreground after-turn maintenance finishes so background work cannot race bootstrap refreshes or hot prompt-cache paths.
+
+- [#503](https://github.com/Martian-Engineering/lossless-claw/pull/503) [`fd62205`](https://github.com/Martian-Engineering/lossless-claw/commit/fd6220563a3629f19d6e1b6ee2ca490566bc2a57) Thanks [@copilot-swe-agent](https://github.com/apps/copilot-swe-agent)! - Strip provider reasoning and thinking blocks from leaf compaction summarizer input while preserving visible message text.
+
+## 0.9.2
+
+### Patch Changes
+
+- [#444](https://github.com/Martian-Engineering/lossless-claw/pull/444) [`6596fb4`](https://github.com/Martian-Engineering/lossless-claw/commit/6596fb4f3113aa34799662b46698d5fdd053683f) Thanks [@andyylin](https://github.com/andyylin)! - Fix context-engine registration so the plugin only registers its canonical `lossless-claw` id, align runtime Pi package versions with the current OpenClaw stack, and tighten selection helpers to stop treating the old `default` alias as equivalent to the plugin id.
+
+- [#455](https://github.com/Martian-Engineering/lossless-claw/pull/455) [`370b91b`](https://github.com/Martian-Engineering/lossless-claw/commit/370b91b58033a890f5ff9e97fd2a950a50618ba4) Thanks [@copilot-swe-agent](https://github.com/apps/copilot-swe-agent)! - Wrap SQLite migrations in a single exclusive transaction so concurrent startup agents serialize migration work instead of racing on per-statement autocommit writes.
+
+- [#465](https://github.com/Martian-Engineering/lossless-claw/pull/465) [`6f7f942`](https://github.com/Martian-Engineering/lossless-claw/commit/6f7f942ca516bf43dbec9b098a84defcd1677328) Thanks [@liu51115](https://github.com/liu51115)! - Harden defensive handling for non-string database path and timestamp values so malformed runtime data does not trigger `.trim()` crashes or silently skew stored chronology.
+
+- [#405](https://github.com/Martian-Engineering/lossless-claw/pull/405) [`5949a4b`](https://github.com/Martian-Engineering/lossless-claw/commit/5949a4b8a4e35281421b3f3a18c0c95897d3cf4f) Thanks [@uf-hy](https://github.com/uf-hy)! - Restrict the missed-`/reset` bootstrap fallback to confirmed missing transcript paths so transient `stat()` failures do not rotate a live conversation.
+
+- [#450](https://github.com/Martian-Engineering/lossless-claw/pull/450) [`36c80d5`](https://github.com/Martian-Engineering/lossless-claw/commit/36c80d5f8b12483ff4de827359fd22da61b8192b) Thanks [@coryscook](https://github.com/coryscook)! - Use the resolved plugin summary config when runtime config is unavailable so compaction keeps the configured summary model instead of falling back to emergency truncation.
+
+- [#418](https://github.com/Martian-Engineering/lossless-claw/pull/418) [`f8fe367`](https://github.com/Martian-Engineering/lossless-claw/commit/f8fe367c9c7d18c0d2b470c72f799e516150c8aa) Thanks [@gitchrisqueen](https://github.com/gitchrisqueen)! - Fix manual and threshold-triggered compaction results so a full sweep that ends under the target budget reports `already under target` instead of a misleading no-op failure.
+
+- [#468](https://github.com/Martian-Engineering/lossless-claw/pull/468) [`082b2a9`](https://github.com/Martian-Engineering/lossless-claw/commit/082b2a918c2721001ea30e952bde95bc500b7241) Thanks [@jalehman](https://github.com/jalehman)! - Unify `lcm-tui` summary provider configuration across doctor, repair, rewrite, and backfill so the standalone commands honor the same provider, model, and base URL overrides as interactive rewrite.
+
+- [#467](https://github.com/Martian-Engineering/lossless-claw/pull/467) [`6580e8f`](https://github.com/Martian-Engineering/lossless-claw/commit/6580e8f641e3b19d7b452d030a71a2d871106722) Thanks [@jalehman](https://github.com/jalehman)! - Fix `lcm-tui` OAuth-backed Claude rewrites, repairs, and doctor apply runs so large prompts stream over stdin instead of overflowing the CLI argument limit.
+
+- [#456](https://github.com/Martian-Engineering/lossless-claw/pull/456) [`134bb8a`](https://github.com/Martian-Engineering/lossless-claw/commit/134bb8aadada3e8e6884940843ad4ebaeb0bf254) Thanks [@jalehman](https://github.com/jalehman)! - Improve prompt-cache stability by making compacted-context guidance static and disabling prompt-aware eviction by default.
+
+## 0.9.1
+
+### Patch Changes
+
+- [#392](https://github.com/Martian-Engineering/lossless-claw/pull/392) [`00d1fa2`](https://github.com/Martian-Engineering/lossless-claw/commit/00d1fa2c5a7cd2c1b77adb0a9f6c103e487f5e52) Thanks [@GodsBoy](https://github.com/GodsBoy)! - Avoid repeated full bootstrap rereads when an unchanged session transcript misses the normal checkpoint fast paths.
+
+- [#305](https://github.com/Martian-Engineering/lossless-claw/pull/305) [`2d1446f`](https://github.com/Martian-Engineering/lossless-claw/commit/2d1446f29b2e54701baf5b234c2937a5b2909bd7) Thanks [@stilrmy](https://github.com/stilrmy)! - Fix startup-time summary model resolution when OpenClaw populates plugin config before the top-level runtime config surface.
+
+- [#388](https://github.com/Martian-Engineering/lossless-claw/pull/388) [`5bdd596`](https://github.com/Martian-Engineering/lossless-claw/commit/5bdd596f6c3223c3cdaf12c15ba44b685d1b61c6) Thanks [@bennybuoy](https://github.com/bennybuoy)! - Fix the built-in API-family fallback for `ollama` providers so summarization can use OpenAI-compatible Ollama models without requiring an explicit `models.providers.ollama.api` setting.
+
+- [#433](https://github.com/Martian-Engineering/lossless-claw/pull/433) [`5c8ef34`](https://github.com/Martian-Engineering/lossless-claw/commit/5c8ef34ff6baf551a42c73dc1b217a3bb4828891) Thanks [@jalehman](https://github.com/jalehman)! - Apply content-recency sorting consistently to CJK summary full-text search so recent summarized content does not lose to older but stronger trigram matches.
+
+- [#441](https://github.com/Martian-Engineering/lossless-claw/pull/441) [`26708b9`](https://github.com/Martian-Engineering/lossless-claw/commit/26708b9b0b788babba4d1349158414722b18af63) Thanks [@jalehman](https://github.com/jalehman)! - Keep deferred incremental compaction debt pending until oversized raw backlog is actually compacted, and let budget-triggered catch-up scale passes with prompt overage instead of forcing one pass per turn.
+
+- [#434](https://github.com/Martian-Engineering/lossless-claw/pull/434) [`049ce3b`](https://github.com/Martian-Engineering/lossless-claw/commit/049ce3b82339ad373dcc6ef6346fb98087c65159) Thanks [@jalehman](https://github.com/jalehman)! - Keep deferred Anthropic leaf compaction moving once the prompt-cache TTL has gone stale, even if cache-aware cold-observation smoothing still treats the session as effectively hot for routing-noise protection.
+
+## 0.9.0
+
+### Minor Changes
+
+- [#408](https://github.com/Martian-Engineering/lossless-claw/pull/408) [`abf31da`](https://github.com/Martian-Engineering/lossless-claw/commit/abf31da5a5978fc40096699dbb1f52f97d766aaa) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Added deferred proactive compaction as the default mode, with explicit maintenance debt tracking and status visibility so foreground turns no longer run threshold compaction inline unless compatibility mode is enabled.
+
+- [#355](https://github.com/Martian-Engineering/lossless-claw/pull/355) [`6e9388c`](https://github.com/Martian-Engineering/lossless-claw/commit/6e9388c17036caa6021ab075e4d91ee928d73986) Thanks [@LanicBlue](https://github.com/LanicBlue)! - Externalize inline base64 images before large tool-result text compaction, and add `largeFilesDir` / `LCM_LARGE_FILES_DIR` so externalized payload storage can be configured explicitly.
+
+### Patch Changes
+
+- [#403](https://github.com/Martian-Engineering/lossless-claw/pull/403) [`ea7d532`](https://github.com/Martian-Engineering/lossless-claw/commit/ea7d5327d648790350724c15990b5c1ab98bf611) Thanks [@jetd1](https://github.com/jetd1)! - Convert bootstrap's file I/O off the Node.js event loop. `readFileSegment` and `readLastJsonlEntryBeforeOffset` previously used sync `openSync`/`readSync`/`statSync`, which could block the gateway for minutes while scanning multi-MB JSONL transcripts during the bootstrap append-only path. The bootstrap entry `statSync` and `refreshBootstrapState` helper are now async as well. The backward-scan loop now only reads new chunks when the current carry has no more newlines, and the fast path short-circuits before the backward scan when the DB's latest hash no longer matches the checkpoint (the common case during active sessions, where the scan can never succeed).
+
+- [#395](https://github.com/Martian-Engineering/lossless-claw/pull/395) [`2c05599`](https://github.com/Martian-Engineering/lossless-claw/commit/2c05599c7ac6977be47b3358589c8a43332b2d23) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Add `/lcm backup` and `/lcm rotate` plugin commands so users can snapshot the SQLite database on demand and split oversized active LCM conversations without changing their live OpenClaw session identity. Rotation now checkpoints the current transcript frontier so the fresh row starts from now forward instead of replaying older transcript history.
+
+- [#425](https://github.com/Martian-Engineering/lossless-claw/pull/425) [`3faa9bd`](https://github.com/Martian-Engineering/lossless-claw/commit/3faa9bdb04c5fc01833a2b64a478f224254793a0) Thanks [@jalehman](https://github.com/jalehman)! - Report the canonical `lossless-claw` context-engine id from the runtime engine metadata so newer OpenClaw builds accept the plugin's registered engine slot.
+
+- [#420](https://github.com/Martian-Engineering/lossless-claw/pull/420) [`e0fa375`](https://github.com/Martian-Engineering/lossless-claw/commit/e0fa375ae6fcd5964dae56cadf368e1718649128) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Fix `/lcm rotate` so it waits for the live database connection to become idle, takes a faithful pre-rotate backup on that connection, and then compacts the current session transcript without replacing the active LCM conversation. Rotation now preserves the existing conversation id, summaries, and context items while refreshing bootstrap state so dropped transcript history is not replayed.
+
+- [#415](https://github.com/Martian-Engineering/lossless-claw/pull/415) [`7668717`](https://github.com/Martian-Engineering/lossless-claw/commit/7668717ba3790c208baa8bcb9c4f2ae4f35d7910) Thanks [@ryanngit](https://github.com/ryanngit)! - Handle conversation creation races on active session keys without crashing the caller.
+
+- [#413](https://github.com/Martian-Engineering/lossless-claw/pull/413) [`347add7`](https://github.com/Martian-Engineering/lossless-claw/commit/347add70429ab64b81e2191afa354857e03fd16f) Thanks [@ryanngit](https://github.com/ryanngit)! - Increase the SQLite busy timeout to 30 seconds to better tolerate concurrent writer contention without spurious `SQLITE_BUSY` failures.
+
+## 0.8.2
+
+### Patch Changes
+
+- [#400](https://github.com/Martian-Engineering/lossless-claw/pull/400) [`1711957`](https://github.com/Martian-Engineering/lossless-claw/commit/17119577e847750f3c08ab84e47e0e6628bca9ed) Thanks [@jalehman](https://github.com/jalehman)! - Strip comments from the pre-bundled dist/index.js so the OpenClaw install-time code safety scanner no longer flags JSDoc prose (e.g. "Fetch all context items") as a network-send pattern and blocks installation with an `env-harvesting` false positive.
+
+## 0.8.1
+
+### Patch Changes
+
+- [#379](https://github.com/Martian-Engineering/lossless-claw/pull/379) [`7f42703`](https://github.com/Martian-Engineering/lossless-claw/commit/7f4270327ac22cc9028ff4261d44b53561d93a50) Thanks [@jalehman](https://github.com/jalehman)! - Improve the `session_id` fallback conversation lookup by adding the matching composite index so SQLite can satisfy the latest-conversation query without a scan and temp sort.
+
+- [#366](https://github.com/Martian-Engineering/lossless-claw/pull/366) [`f4177ec`](https://github.com/Martian-Engineering/lossless-claw/commit/f4177ec9f06af3dbc9da5241288f62e61bcd26c0) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Fix bootstrap recovery when a session rotates to a new transcript file so stale summaries and checkpoints are cleared before re-importing the replacement session history.
+
+- [#376](https://github.com/Martian-Engineering/lossless-claw/pull/376) [`06a05e5`](https://github.com/Martian-Engineering/lossless-claw/commit/06a05e515828cc99c4bbd1ceb4edfaa40f869264) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Add startup diagnostics that attribute resolved ignore/stateless pattern sources, and warn when env-backed pattern arrays override plugin config arrays.
+
+- [#353](https://github.com/Martian-Engineering/lossless-claw/pull/353) [`6fa2829`](https://github.com/Martian-Engineering/lossless-claw/commit/6fa2829929c14f0c3175efd59a4df68c0e5b8d45) Thanks [@copilot-swe-agent](https://github.com/apps/copilot-swe-agent)! - Pre-bundle the plugin to `dist/index.js` using esbuild before publishing. This eliminates the per-invocation TypeScript compilation overhead caused by OpenClaw's JITI loader recursively transpiling every `.ts` source file, reducing CLI startup latency from 15–25 s to near-instant.
+
+- [#354](https://github.com/Martian-Engineering/lossless-claw/pull/354) [`b0ad788`](https://github.com/Martian-Engineering/lossless-claw/commit/b0ad78872e3f51fe6b1b1bed0a9c93e8e439554e) Thanks [@copilot-swe-agent](https://github.com/apps/copilot-swe-agent)! - Honor `OPENCLAW_STATE_DIR` for the default database, large-file storage, auth-profile, and legacy secret paths so multi-profile OpenClaw gateways do not read and write each other's state.
+
+- [#380](https://github.com/Martian-Engineering/lossless-claw/pull/380) [`33ecb88`](https://github.com/Martian-Engineering/lossless-claw/commit/33ecb8828b6f6258b6884da15e5750af07a0f846) Thanks [@jalehman](https://github.com/jalehman)! - Stop rerunning startup summary and tool-call backfills after they complete successfully, while still retrying the same backfill version cleanly if startup fails before the completion marker is written.
+
+- [#371](https://github.com/Martian-Engineering/lossless-claw/pull/371) [`597ec70`](https://github.com/Martian-Engineering/lossless-claw/commit/597ec700f09660aa58899ef6ef3f37d19112e0df) Thanks [@holgergruenhagen](https://github.com/holgergruenhagen)! - Avoid treating omitted LCM summarizer reasoning settings like reasoning-disabled requests for reasoning-capable models by applying a low default only when the resolved model supports reasoning.
+
+- [#377](https://github.com/Martian-Engineering/lossless-claw/pull/377) [`3b2d34c`](https://github.com/Martian-Engineering/lossless-claw/commit/3b2d34c4e68601e37ce3b012bb38ae4ca5e977af) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Add an opt-in `transcriptGcEnabled` config flag, defaulting it to `false`, and skip transcript-GC rewrites during `maintain()` unless the flag is enabled. Also add startup diagnostics and documentation for the new setting.
+
+- [#387](https://github.com/Martian-Engineering/lossless-claw/pull/387) [`5113044`](https://github.com/Martian-Engineering/lossless-claw/commit/5113044bbbea5af36324e2a546c5adc40b8aabb2) Thanks [@oguzbilgic](https://github.com/oguzbilgic)! - Refresh the bootstrap checkpoint after normal `afterTurn()` ingestion so persistent sessions can keep using the append-only bootstrap fast path after real conversation turns.
+
+## 0.8.0
+
+### Minor Changes
+
+- [#337](https://github.com/Martian-Engineering/lossless-claw/pull/337) [`0c139a2`](https://github.com/Martian-Engineering/lossless-claw/commit/0c139a2991350a062c59a0a9781f314ebb75af45) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Add `/lossless doctor clean apply` for backup-first cleanup of approved high-confidence junk conversations, while preserving archived-only handling for NULL-key subagent rows and surfacing integrity-check warnings after apply.
+
+- [#323](https://github.com/Martian-Engineering/lossless-claw/pull/323) [`e781980`](https://github.com/Martian-Engineering/lossless-claw/commit/e781980ee706f5d67c902b903a003eaf7665c8e4) Thanks [@jalehman](https://github.com/jalehman)! - Allow `lcm_expand_query(allConversations: true)` to synthesize bounded answers across multiple conversations, including per-conversation diagnostics for partial or truncated results.
+
+### Patch Changes
+
+- [#332](https://github.com/Martian-Engineering/lossless-claw/pull/332) [`98cb02a`](https://github.com/Martian-Engineering/lossless-claw/commit/98cb02a2acddf177a4989e68887e4bbccf06292a) Thanks [@jalehman](https://github.com/jalehman)! - Clarify `lcm_grep` and `lcm_expand_query` guidance so agents use shorter FTS5 queries, keep natural-language instructions in `prompt`, and avoid over-constraining recall with extra keywords.
+
+- [#344](https://github.com/Martian-Engineering/lossless-claw/pull/344) [`897a953`](https://github.com/Martian-Engineering/lossless-claw/commit/897a953300b35208b894050ac73bc8160a03b0da) Thanks [@jetd1](https://github.com/jetd1)! - Keep compaction summary caps and deterministic fallback truncation within budget for CJK-heavy and emoji-heavy content.
+
+- [#331](https://github.com/Martian-Engineering/lossless-claw/pull/331) [`d7a57c5`](https://github.com/Martian-Engineering/lossless-claw/commit/d7a57c51361307fa27818d14c2c7b426609c9ee8) Thanks [@jalehman](https://github.com/jalehman)! - Recover from malformed legacy `summaries_fts` tables during migration instead of crashing plugin startup.
+
+- [#334](https://github.com/Martian-Engineering/lossless-claw/pull/334) [`71d6d9c`](https://github.com/Martian-Engineering/lossless-claw/commit/71d6d9ce1a0846f85cefd92e6895c7cfaee2350a) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Harden malformed FTS migration recovery so stale trigram tables are cleaned up before other FTS schema probes and startup migrations no longer skip recovery by reusing a cached FTS5 capability check.
+
+- [#172](https://github.com/Martian-Engineering/lossless-claw/pull/172) [`8bf5e7f`](https://github.com/Martian-Engineering/lossless-claw/commit/8bf5e7fb73b02d75350aae7cc47df46f9b425f1a) Thanks [@craigamcw](https://github.com/craigamcw)! - Skip ingesting empty assistant messages from errored or aborted provider responses so they do not accumulate in assembled context and trigger retry loops.
+
+- [#330](https://github.com/Martian-Engineering/lossless-claw/pull/330) [`acf1e02`](https://github.com/Martian-Engineering/lossless-claw/commit/acf1e02ef43efc8f8187d51e37493f152fb9d06b) Thanks [@little-jax](https://github.com/little-jax)! - Restore direct-credential summarizer retries for custom provider aliases and avoid misreporting transient provider failures as `provider_config` errors.
+
+- [#351](https://github.com/Martian-Engineering/lossless-claw/pull/351) [`ea1f80d`](https://github.com/Martian-Engineering/lossless-claw/commit/ea1f80d80111f9dafd3d527bf98976e38b6ea694) Thanks [@kitcommerce](https://github.com/kitcommerce)! - Ensure forced overflow recovery still runs compaction when live observed token counts are unavailable.
+
+- [#328](https://github.com/Martian-Engineering/lossless-claw/pull/328) [`3de1f9e`](https://github.com/Martian-Engineering/lossless-claw/commit/3de1f9e8393970af9a170333becf7a3050cb066a) Thanks [@jalehman](https://github.com/jalehman)! - Fall back to `plugins.entries["lossless-claw"].config` when older or otherwise incompatible OpenClaw runtimes do not provide a usable `api.pluginConfig`.
+
+## 0.7.0
+
+### Minor Changes
+
+- [#318](https://github.com/Martian-Engineering/lossless-claw/pull/318) [`b7078df`](https://github.com/Martian-Engineering/lossless-claw/commit/b7078df9c4466c6249a8c0f11424a6e75ea7be4c) Thanks [@jalehman](https://github.com/jalehman)! - Add optional dynamic leaf chunk sizing for incremental compaction, including bounded activity-based chunk growth, cold-cache max bumping, and automatic retry with smaller chunk targets when a provider rejects an oversized compaction request.
+
+- [#296](https://github.com/Martian-Engineering/lossless-claw/pull/296) [`4906c62`](https://github.com/Martian-Engineering/lossless-claw/commit/4906c6283a4033f34397bf527ae4a5c40adccdfc) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Improve `lcm_grep` full-text recall with phrase-preserving queries and `sort` modes (`recency`, `relevance`, and `hybrid`) that rank results before `limit` is applied.
+
+- [#285](https://github.com/Martian-Engineering/lossless-claw/pull/285) [`aac2668`](https://github.com/Martian-Engineering/lossless-claw/commit/aac266834b075f9adae95c86ccf9be9b91161275) Thanks [@mvanhorn](https://github.com/mvanhorn)! - Add conversation prune function for bulk data retention, allowing deletion of conversations where all messages are older than a configurable threshold.
+
+### Patch Changes
+
+- [#295](https://github.com/Martian-Engineering/lossless-claw/pull/295) [`1ef1b29`](https://github.com/Martian-Engineering/lossless-claw/commit/1ef1b297c5d3dead44cc4460cdf60ef6191395ea) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Reduce compaction database work by caching per-phase context reads, skipping redundant ordinal resequencing, and tracking token-count deltas instead of re-querying after each pass.
+
+- [#318](https://github.com/Martian-Engineering/lossless-claw/pull/318) [`b7078df`](https://github.com/Martian-Engineering/lossless-claw/commit/b7078df9c4466c6249a8c0f11424a6e75ea7be4c) Thanks [@jalehman](https://github.com/jalehman)! - Make incremental leaf compaction cache-aware by deferring extra passes while prompt caching is hot, allowing bounded catch-up when the cache goes cold, and adding `cacheAwareCompaction` config controls for the behavior.
+
+- [#319](https://github.com/Martian-Engineering/lossless-claw/pull/319) [`3bc5bde`](https://github.com/Martian-Engineering/lossless-claw/commit/3bc5bde7a52b163ee2fe7f22302e97e3e8295b11) Thanks [@jalehman](https://github.com/jalehman)! - Document the full lossless-claw configuration surface and align the plugin manifest schema and UI hints with the runtime-supported config keys.
+
+- [#288](https://github.com/Martian-Engineering/lossless-claw/pull/288) [`d74ad07`](https://github.com/Martian-Engineering/lossless-claw/commit/d74ad070888e7be5e4e1730ddc6506708075317e) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Wait for deferred LCM database initialization after lock-contended gateway restarts, and surface the real retry failure when deferred startup cannot recover.
+
+- [#294](https://github.com/Martian-Engineering/lossless-claw/pull/294) [`43342d9`](https://github.com/Martian-Engineering/lossless-claw/commit/43342d9fea5c62ea4320a7bca60732bad09122d2) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Tune SQLite defaults for large lossless-claw databases by increasing the page cache, keeping temporary structures in memory, and using WAL-friendly synchronous settings.
+
+  Add missing indexes for `summary_messages(message_id)` and `summaries(conversation_id, depth, kind)` so summary cleanup and depth-filtered queries avoid full table scans on existing databases.
+
+- [#302](https://github.com/Martian-Engineering/lossless-claw/pull/302) [`558183d`](https://github.com/Martian-Engineering/lossless-claw/commit/558183d9ead262d06d58bbfc801e172781c278b8) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Fix compaction summarizer exhaustion handling so multi-provider non-auth failures log the terminal exhaustion path and fall back to deterministic truncation instead of returning an empty summary.
+
+- [#322](https://github.com/Martian-Engineering/lossless-claw/pull/322) [`d0dacc9`](https://github.com/Martian-Engineering/lossless-claw/commit/d0dacc929f317bc7470fc935f6338461603f4039) Thanks [@jalehman](https://github.com/jalehman)! - Use OpenClaw runtime-ready model auth for summarization requests so managed auth providers work correctly.
+
+- [#329](https://github.com/Martian-Engineering/lossless-claw/pull/329) [`6579b91`](https://github.com/Martian-Engineering/lossless-claw/commit/6579b913adcc3a88610d873f7eacefbaa663c3d2) Thanks [@jalehman](https://github.com/jalehman)! - Improve lossless-claw reliability around cache-aware compaction and transcript replay, including heartbeat-turn pruning, bootstrap compatibility for legacy JSONL message envelopes, and updated runtime logging/docs alignment.
+
+- [#300](https://github.com/Martian-Engineering/lossless-claw/pull/300) [`a42f422`](https://github.com/Martian-Engineering/lossless-claw/commit/a42f422c1bc6c386c31e098d0b865dd3fedcbe9f) Thanks [@jalehman](https://github.com/jalehman)! - Fix `lcm-tui` Telegram topic session lookups so topic-backed sessions show the correct conversation metadata, summary counts, and file counts when browsing session keys.
+
+## 0.6.3
+
+### Patch Changes
+
+- [#244](https://github.com/Martian-Engineering/lossless-claw/pull/244) [`cb51dd2`](https://github.com/Martian-Engineering/lossless-claw/commit/cb51dd237693e8992efb0d6eea843609619bd2bf) Thanks [@jalehman](https://github.com/jalehman)! - Use OpenClaw's enriched `session_end` hook to preserve clean LCM conversation boundaries across automatic session rollover, compaction session replacement, and session deletion.
+
+- [`4ddf05c`](https://github.com/Martian-Engineering/lossless-claw/commit/4ddf05c399a2a752bd296cf4ddcdb87e0dc36a01) Thanks [@mvanhorn](https://github.com/mvanhorn)! - Route all LCM startup diagnostics to stderr so `--json` CLI output stays machine-readable, while keeping debug-only migration details behind the host logger's debug gating.
+
+- [#280](https://github.com/Martian-Engineering/lossless-claw/pull/280) [`9a2c3e1`](https://github.com/Martian-Engineering/lossless-claw/commit/9a2c3e1a3e74957e1280b8026cebad4b0e7f0418) Thanks [@liu51115](https://github.com/liu51115)! - Fix bootstrap checkpoint refresh after transcript maintenance so unchanged restarts stay on the fast path, and avoid advancing the checkpoint when replay-safety import caps abort reconciliation.
+
+## 0.6.2
+
+### Patch Changes
+
+- [#270](https://github.com/Martian-Engineering/lossless-claw/pull/270) [`8618ea7`](https://github.com/Martian-Engineering/lossless-claw/commit/8618ea75278daec1f7e4be00775e40d5961d5697) Thanks [@jalehman](https://github.com/jalehman)! - Fix forced timeout-recovery compaction so live budget overflows use the capped `compactUntilUnder()` path instead of no-oping through a stored-context full sweep.
+
+- [#273](https://github.com/Martian-Engineering/lossless-claw/pull/273) [`40c90b1`](https://github.com/Martian-Engineering/lossless-claw/commit/40c90b1e30d53202dee08ae86a91464aedd9d420) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Fix LCM summarization for runtime-managed OAuth providers like `openai-codex` by preserving first-pass credential resolution and skipping the incompatible direct-credential retry path. Also add configurable summarizer timeouts via `summaryTimeoutMs` and `LCM_SUMMARY_TIMEOUT_MS`.
+
+- [#261](https://github.com/Martian-Engineering/lossless-claw/pull/261) [`65c76f1`](https://github.com/Martian-Engineering/lossless-claw/commit/65c76f17ad82f1b3392be4e1a5e85e3172eb9a3d) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Fix shared-SQLite transaction coordination during bootstrap and compaction so concurrent sessions do not collide on one database connection, and nested transaction scopes on the same async path stay safe.
+
+## 0.6.1
+
+### Patch Changes
+
+- [`d1a9eb3`](https://github.com/Martian-Engineering/lossless-claw/commit/d1a9eb36b543050bdda442faab93bab48bd3e130) Thanks [@jalehman](https://github.com/jalehman)! - Fix conversation integrity regressions by pruning heartbeat-shaped ACK turns before compaction, avoiding synthetic compaction telemetry in canonical transcript history, and deduplicating replayed history using stable session key continuity during afterTurn processing.
+
+## 0.6.0
+
+### Minor Changes
+
+- [#195](https://github.com/Martian-Engineering/lossless-claw/pull/195) [`8efd2e9`](https://github.com/Martian-Engineering/lossless-claw/commit/8efd2e98a0000edf90953ecbb5060cf9c56baad3) Thanks [@jalehman](https://github.com/jalehman)! - Add explicit `/new` and `/reset` lifecycle handling for OpenClaw sessions.
+
+  `/new` now prunes fresh context from the active conversation while preserving retained summaries by configured depth, and `/reset` now archives the current conversation before starting a fresh active conversation for the same stable session key.
+
+- [#243](https://github.com/Martian-Engineering/lossless-claw/pull/243) [`f074000`](https://github.com/Martian-Engineering/lossless-claw/commit/f07400009be2f181f3fe382dbab5985793873540) Thanks [@jalehman](https://github.com/jalehman)! - Add the bundled `lossless-claw` skill and the MVP `/lcm` command surface with summary-health diagnostics.
+
+- [#148](https://github.com/Martian-Engineering/lossless-claw/pull/148) [`ef445da`](https://github.com/Martian-Engineering/lossless-claw/commit/ef445da2fa518cbb6abeabffa4577588f5d9d74e) Thanks [@jalehman](https://github.com/jalehman)! - Add runtime-assisted transcript GC for summarized externalized tool results so active session transcripts can shrink after oversized tool output has been condensed and preserved in `large_files`.
+
+### Patch Changes
+
+- [#255](https://github.com/Martian-Engineering/lossless-claw/pull/255) [`a1bda9b`](https://github.com/Martian-Engineering/lossless-claw/commit/a1bda9becb9914af8cfc5c091ef7f6bcdbdbf199) Thanks [@jalehman](https://github.com/jalehman)! - Limit first-time fork bootstrap imports so new conversations only inherit the newest slice of raw parent history instead of loading the entire parent transcript into lossless memory.
+
+- [#258](https://github.com/Martian-Engineering/lossless-claw/pull/258) [`cd18739`](https://github.com/Martian-Engineering/lossless-claw/commit/cd18739b08410e5c1e4dcd529afb6016a48bf303) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Add regression coverage for bootstrap budget edge cases and invalid numeric env fallback behavior.
+
+- [#230](https://github.com/Martian-Engineering/lossless-claw/pull/230) [`ca51445`](https://github.com/Martian-Engineering/lossless-claw/commit/ca51445c52e4c1c102023f0336a9d7e29f78c226) Thanks [@liu51115](https://github.com/liu51115)! - Fix compaction auth circuit breaker handling so auth failures during multi-pass sweeps still trip the breaker, while failures for one resolved summarizer no longer block unrelated providers or sessions.
+
+- [#229](https://github.com/Martian-Engineering/lossless-claw/pull/229) [`1fb8b8f`](https://github.com/Martian-Engineering/lossless-claw/commit/1fb8b8ff37055eab16e4c9204249bdb91aa401ac) Thanks [@tingyiy](https://github.com/tingyiy)! - Preserve explicit timezone offsets when parsing stored timestamps while still treating bare SQLite `datetime('now')` values as UTC.
+
+- [#219](https://github.com/Martian-Engineering/lossless-claw/pull/219) [`69e5f6a`](https://github.com/Martian-Engineering/lossless-claw/commit/69e5f6a1cc740107658c1a594945ef50834a45cc) Thanks [@catgodtwno4](https://github.com/catgodtwno4)! - Fix CJK summary search so mixed-language queries still require all terms, and single-character CJK queries continue to return matches.
+
+- [#222](https://github.com/Martian-Engineering/lossless-claw/pull/222) [`d8261d7`](https://github.com/Martian-Engineering/lossless-claw/commit/d8261d74ec9c9d866045b4283034f123f38b5d81) Thanks [@copilot-swe-agent](https://github.com/apps/copilot-swe-agent)! - Block overlapping `lcm_expand_query` delegations from the same origin session so concurrent expansion requests fail fast instead of deadlocking on the shared sub-agent lane.
+
+- [#257](https://github.com/Martian-Engineering/lossless-claw/pull/257) [`ea43f58`](https://github.com/Martian-Engineering/lossless-claw/commit/ea43f58746cf8c96b8feb5a9f6b8a1fe02477573) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Fix the hardened `afterTurn()` replay dedup path so it ingests the intended post-turn batch, and add coverage for restart replay when an auto-compaction summary is present.
+
+- [#180](https://github.com/Martian-Engineering/lossless-claw/pull/180) [`ea84f45`](https://github.com/Martian-Engineering/lossless-claw/commit/ea84f454a07d205ff225b5c73d4f91f73e2614bd) Thanks [@GodsBoy](https://github.com/GodsBoy)! - Fix prompt-aware context eviction so blank or otherwise unsearchable prompts fall back to the existing chronological behavior instead of entering the relevance-scoring path.
+
+- [#178](https://github.com/Martian-Engineering/lossless-claw/pull/178) [`0613b7f`](https://github.com/Martian-Engineering/lossless-claw/commit/0613b7fc7707a4ccea1ffbf7d2c8be82bd4dcee6) Thanks [@catgodtwno4](https://github.com/catgodtwno4)! - Fix summarizer auth-error detection so real provider auth envelopes nested under `data` or `body` still trigger handling, while successful summary payloads in `message` or `response` no longer cause false-positive auth failures.
+
+- [#242](https://github.com/Martian-Engineering/lossless-claw/pull/242) [`3fe823f`](https://github.com/Martian-Engineering/lossless-claw/commit/3fe823f4dcec720c158f712fa4c4487482e80ade) Thanks [@jalehman](https://github.com/jalehman)! - Move static lossless recall policy guidance into the plugin prompt hook while keeping `systemPromptAddition` limited to session-specific compaction reminders.
+
+  This makes the stable recall-order guidance cacheable, clarifies that lossless-claw takes precedence over generic memory recall only for compacted conversation history, and leaves deep-compaction expand-before-asserting guidance in the dynamic assembled prompt.
+
+- [#252](https://github.com/Martian-Engineering/lossless-claw/pull/252) [`e843638`](https://github.com/Martian-Engineering/lossless-claw/commit/e8436388311e110b983d280e2157a9f013e41d4e) Thanks [@jalehman](https://github.com/jalehman)! - Sync the published plugin manifest schema with the runtime-supported plugin config surface so documented config keys are accepted by OpenClaw. This also removes the undocumented `autocompactDisabled` setting from the advertised config surface because it was parsed but not wired to runtime behavior.
+
+## 0.5.3
+
+### Patch Changes
+
+- [#228](https://github.com/Martian-Engineering/lossless-claw/pull/228) [`2f5735d`](https://github.com/Martian-Engineering/lossless-claw/commit/2f5735d5e81f3eec2aa2c09d1b62e706e5e0a3b4) Thanks [@jalehman](https://github.com/jalehman)! - Make compaction summarization fall back to the next resolved model when the preferred model times out or returns repeated empty provider errors, and make the startup banner reflect the same compaction model precedence used at runtime.
+
+- [#221](https://github.com/Martian-Engineering/lossless-claw/pull/221) [`9fa4f3d`](https://github.com/Martian-Engineering/lossless-claw/commit/9fa4f3d0b8de013f089e6160025d88cd1e48c76a) Thanks [@jalehman](https://github.com/jalehman)! - Raise the default protected fresh tail to 64 messages and make incremental compaction run one condensed pass by default.
+
+- [#224](https://github.com/Martian-Engineering/lossless-claw/pull/224) [`1fd2a44`](https://github.com/Martian-Engineering/lossless-claw/commit/1fd2a44889411fd1fea3621a9b29aeee4b4e60fe) Thanks [@copilot-swe-agent](https://github.com/apps/copilot-swe-agent)! - Add a configurable delegated expansion timeout for `lcm_expand_query` via plugin config (`delegationTimeoutMs`) and `LCM_DELEGATION_TIMEOUT_MS`.
+
+- [#223](https://github.com/Martian-Engineering/lossless-claw/pull/223) [`028f171`](https://github.com/Martian-Engineering/lossless-claw/commit/028f17182350c120bf94f81781be3c9fbf11b206) Thanks [@copilot-swe-agent](https://github.com/apps/copilot-swe-agent)! - Expose `leafChunkTokens` as a first-class plugin config option so deployments can tune leaf compaction frequency without patching the plugin manifest.
+
+- [#220](https://github.com/Martian-Engineering/lossless-claw/pull/220) [`8f84d8e`](https://github.com/Martian-Engineering/lossless-claw/commit/8f84d8ebfbe2163e6624fffa7468ef0de928a9da) Thanks [@jalehman](https://github.com/jalehman)! - Improve LongMemEval compaction and retrieval reliability by filtering reasoning text from summaries, retrying truncated summaries, hardening delegated expansion, and falling back to raw-message search in shallow trees.
+
+- [#205](https://github.com/Martian-Engineering/lossless-claw/pull/205) [`ef4865f`](https://github.com/Martian-Engineering/lossless-claw/commit/ef4865fb13a1a8e373a045c0dd2a907ae1bbbfde) Thanks [@aquaright1](https://github.com/aquaright1)! - Preserve assistant text and matched tool calls when pruning stale orphaned tool calls from assembled context.
+
+- [#211](https://github.com/Martian-Engineering/lossless-claw/pull/211) [`7975a1e`](https://github.com/Martian-Engineering/lossless-claw/commit/7975a1e86f1d58808ef0d1bb0677c6e993f30c5e) Thanks [@GodsBoy](https://github.com/GodsBoy)! - Fix compaction cap handling so capped summaries stay within the configured token limit and direct compaction APIs respect `maxAssemblyTokenBudget`.
+
+## 0.5.2
+
+### Patch Changes
+
+- [#185](https://github.com/Martian-Engineering/lossless-claw/pull/185) [`ec74779`](https://github.com/Martian-Engineering/lossless-claw/commit/ec747792c01153e44f08bfbf410ddf2526fca7cf) Thanks [@jalehman](https://github.com/jalehman)! - Fix `lcm-tui doctor` to detect third truncation marker format (`[LCM fallback summary; truncated for context management]`) and harden Claude CLI summarization with `--system-prompt` flag and neutral working directory to prevent workspace contamination.
+
+- [#186](https://github.com/Martian-Engineering/lossless-claw/pull/186) [`c796f7d`](https://github.com/Martian-Engineering/lossless-claw/commit/c796f7d9d014a19f2b55e62895a32327b0347694) Thanks [@jalehman](https://github.com/jalehman)! - Harden LCM summarization so provider auth failures no longer persist fallback summaries, and stop forcing explicit temperature overrides on summarizer requests.
+
+- [#182](https://github.com/Martian-Engineering/lossless-claw/pull/182) [`954a2fd`](https://github.com/Martian-Engineering/lossless-claw/commit/954a2fd848b6444561e26afc2b41ad01e27d5a08) Thanks [@jalehman](https://github.com/jalehman)! - Improve `lcm-tui` session browsing by showing stable session keys in the session list and conversation header, and align the session list columns so message counts and LCM metadata are easier to scan.
+
+- [#128](https://github.com/Martian-Engineering/lossless-claw/pull/128) [`0f1a5d8`](https://github.com/Martian-Engineering/lossless-claw/commit/0f1a5d89a95225baee39e017449e5956e7990b27) Thanks [@TSHOGX](https://github.com/TSHOGX)! - Honor custom API base URL overrides for `lcm-tui rewrite`, `lcm-tui backfill`, and interactive rewrite so TUI summarization can use configured provider proxies and non-default endpoints.
+
+## 0.5.1
+
+### Patch Changes
+
+- [#159](https://github.com/Martian-Engineering/lossless-claw/pull/159) [`20b6c1b`](https://github.com/Martian-Engineering/lossless-claw/commit/20b6c1bd0c8c5903ce4498e9cef235392fa0cfc4) Thanks [@tmchow](https://github.com/tmchow)! - Fix legacy tool-call backfill for rows that stored ids under `metadata.raw.call_id`.
+
+- [#163](https://github.com/Martian-Engineering/lossless-claw/pull/163) [`31307a6`](https://github.com/Martian-Engineering/lossless-claw/commit/31307a671549438fe795b1ddd941a9af90ec51dc) Thanks [@jalehman](https://github.com/jalehman)! - Prevent the summarizer from reusing the active session auth profile when an explicit LCM summary provider and model are configured.
+
+## 0.5.0
+
+### Minor Changes
+
+- [#157](https://github.com/Martian-Engineering/lossless-claw/pull/157) [`f3f0aa2`](https://github.com/Martian-Engineering/lossless-claw/commit/f3f0aa29e636542e47f5020a1d6759dff023d798) Thanks [@jalehman](https://github.com/jalehman)! - Add `lcm-tui doctor` command for auto-detecting and repairing truncation-fallback summaries. Features position-aware marker detection (rejects false positives from summaries that quote markers in narrative text), bottom-up repair ordering, OAuth/token CLI delegation, and transaction-safe dry-run mode.
+
+- [#138](https://github.com/Martian-Engineering/lossless-claw/pull/138) [`9047e49`](https://github.com/Martian-Engineering/lossless-claw/commit/9047e49a91db0e4cba83f4f1c11fc10a899e5528) Thanks [@jalehman](https://github.com/jalehman)! - Add incremental bootstrap checkpoints and large tool-output externalization.
+
+  This release speeds up restart/bootstrap by checkpointing session transcript state,
+  skipping unchanged transcript replays, and using append-only tail imports when a
+  session file only grew. It also externalizes oversized tool outputs into
+  `large_files` with compact placeholders so long-running OpenClaw sessions keep
+  their full recall surface without carrying giant inline tool payloads in the
+  active transcript.
+
+### Patch Changes
+
+- [#156](https://github.com/Martian-Engineering/lossless-claw/pull/156) [`968b1d6`](https://github.com/Martian-Engineering/lossless-claw/commit/968b1d6b2ff41a297645309aa7c1d7dc80bee7ab) Thanks [@jalehman](https://github.com/jalehman)! - Fix compaction auth failures: surface provider auth errors instead of silently aborting, fall back to deterministic truncation when summarizer returns empty content, fall through to legacy auth-profiles.json when modelAuth returns scope-limited credentials. TUI now sets WAL mode and busy_timeout to prevent SQLITE_BUSY during concurrent usage.
+
+- [#129](https://github.com/Martian-Engineering/lossless-claw/pull/129) [`133665c`](https://github.com/Martian-Engineering/lossless-claw/commit/133665c24d5e4bdd1ad01cd4373b65af5d37d868) Thanks [@semiok](https://github.com/semiok)! - Use LIKE search for full-text queries containing CJK characters. SQLite FTS5's `unicode61` tokenizer can return empty or incomplete results for Chinese/Japanese/Korean text, so CJK queries now bypass FTS and use the existing LIKE-based fallback for correct matches.
+
+- [#132](https://github.com/Martian-Engineering/lossless-claw/pull/132) [`4522a72`](https://github.com/Martian-Engineering/lossless-claw/commit/4522a7217511dc99be2576ac49cb216515213aea) Thanks [@hhe48203-ctrl](https://github.com/hhe48203-ctrl)! - Persist the resolved compaction summarization model on summary records instead of
+  always showing `unknown`.
+
+  Existing `summaries` rows keep the `unknown` fallback through an additive
+  migration, while newly created summaries now record the actual model configured
+  for compaction.
+
+- [#126](https://github.com/Martian-Engineering/lossless-claw/pull/126) [`437c240`](https://github.com/Martian-Engineering/lossless-claw/commit/437c240c580e0407f4732b401792bec10ab50f1b) Thanks [@cryptomaltese](https://github.com/cryptomaltese)! - Annotate attachment-only messages during compaction without dropping short captions.
+
+  This release improves media-aware compaction summaries by replacing raw
+  `MEDIA:/...` placeholders for attachment-only messages while still preserving
+  real caption text, including short captions such as `Look at this!`, when a
+  message also includes a media attachment.
+
+- [#146](https://github.com/Martian-Engineering/lossless-claw/pull/146) [`c37777f`](https://github.com/Martian-Engineering/lossless-claw/commit/c37777f416afb088f816fe1bb10b17773d08306f) Thanks [@qualiobra](https://github.com/qualiobra)! - Fix a session-queue cleanup race that could leak per-session queue entries during
+  overlapping ingest or compaction operations.
+
+- [#131](https://github.com/Martian-Engineering/lossless-claw/pull/131) [`bab46cc`](https://github.com/Martian-Engineering/lossless-claw/commit/bab46ccd633ee159443b965793cb83cb64f673a2) Thanks [@semiok](https://github.com/semiok)! - Add 60-second timeout protection to summarizer LLM calls. Previously, a slow or unresponsive model provider could block the `deps.complete()` call indefinitely, starving the Node.js event loop and causing downstream failures such as Telegram polling disconnects. Both the initial and retry summarization calls are now wrapped with a timeout that rejects cleanly and falls through to the existing deterministic fallback.
+
+## 0.4.0
+
+### Minor Changes
+
+- 45f714c: Add `expansionModel` and `expansionProvider` overrides for delegated
+  `lcm_expand_query` subagent runs.
+- 1e6812a: Add session scoping controls for ignored and stateless OpenClaw sessions,
+  including cron and subagent pattern support, and make runtime summary model
+  environment overrides win reliably over plugin config during compaction.
+
+### Patch Changes
+
+- 518a1b2: Restore automatic post-turn compaction when OpenClaw omits the top-level
+  `tokenBudget`, by resolving fallback budget inputs consistently before using
+  the default compaction budget.
+- 6c54c7b: Declare explicit OpenClaw tool names for the LCM factory-registered tools so
+  plugin metadata and tool listings stay populated in hosts that require
+  `registerTool(..., { name })` hints for factory registrations.
+- 9ee103a: Fix condensed summary expansion so replay walks the source summaries that were compacted into a node, and skip proactive compaction when turn ingest fails to avoid compacting a stale frontier.
+- ae260f7: Fix the TUI Anthropic OAuth fallback so Claude CLI summaries respect the selected model and stay within the expected summary size budget.
+- 8f77fe7: Run LCM migrations during engine startup and only advertise `ownsCompaction`
+  when the database schema is operational, while preserving runtime compaction
+  settings and accurate token accounting for structured tool results.
+- 7fae41c: Fix assembler round-tripping for tool results so structured `tool_result` content is preserved and normalized tool metadata no longer inflates context token budgeting.
+- ceee14e: Restore stable conversation continuity across OpenClaw session UUID recycling
+  by resolving sessions through `sessionKey` for both writes and read-only
+  lookups, and keep compaction/ingest serialization aligned with that stable
+  identity.
+- bbd2ecb: Emit LCM startup and configuration banner logs only once per process so
+  repeated OpenClaw plugin registration during snapshot loads does not duplicate
+  the same startup lines.
+- 82becaf: Remove hardcoded non-LCM recall tool names from the dynamic summary prompt so
+  agents rely on whatever memory tooling is actually available in the host
+  session.
+- 6b85751: Restore compatibility for existing OpenClaw sessions that still reference the
+  legacy `default` context engine, and improve container deployments by adding a
+  supported Docker image and startup flow for LCM-backed OpenClaw environments.
+- 828d106: Improve LCM summarization model resolution so configured `summaryModel`
+  overrides, OpenClaw `agents.defaults.compaction.model`, and newer
+  `runtimeContext` inputs are honored more reliably while preserving
+  compatibility with older `legacyCompactionParams` integrations.
+
+## 0.3.0
+
+### Minor Changes
+
+- f1dfa5c: Catch up the release notes for work merged after `0.2.8`.
+
+  This release adds Anthropic OAuth setup-token support in the TUI, resolves
+  SecretRef-backed auth-profile credentials and provider-level custom provider
+  configuration during summarization, and formats LCM tool timestamps in the local
+  timezone instead of UTC.

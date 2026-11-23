@@ -1,0 +1,386 @@
+/**
+ * Compatibility bridge for plugin-sdk context-engine symbols.
+ *
+ * This module intentionally keeps the context-engine contract local because
+ * older OpenClaw SDK packages do not publish these newer type symbols yet.
+ */
+
+export type AnyAgentTool = {
+  name: string;
+  label?: string;
+  description?: string;
+  parameters?: unknown;
+  execute: (toolCallId: string, params: Record<string, unknown>) => any | Promise<any>;
+  [key: string]: any;
+};
+
+export type PluginLifecycleContext = {
+  sessionId?: string;
+  sessionKey?: string;
+  [key: string]: any;
+};
+
+export type PluginLifecycleEvent = {
+  reason?: string;
+  sessionId?: string;
+  sessionKey?: string;
+  [key: string]: any;
+};
+
+export type ContextEngineProjection = {
+  mode: "per_turn" | "thread_bootstrap";
+  epoch?: string;
+  fingerprint?: string;
+};
+
+/** Runtime ownership metadata projected by host-aware OpenClaw versions. */
+export type ContextEngineRuntimeSettings = {
+  schemaVersion: 1;
+  executionHost: {
+    id: string | null;
+    label: string | null;
+  };
+  [key: string]: unknown;
+};
+
+export type AssembleResult = {
+  messages: AgentMessage[];
+  estimatedTokens: number;
+  /** Ask OpenClaw to include pre-assembly history in its overflow precheck. */
+  promptAuthority?: "assembled" | "preassembly_may_overflow";
+  systemPromptAddition?: string;
+  contextProjection?: ContextEngineProjection;
+};
+
+export type BootstrapResult = {
+  bootstrapped: boolean;
+  importedMessages: number;
+  reason?: string;
+};
+
+export type CompactResult = {
+  ok: boolean;
+  compacted: boolean;
+  reason?: string;
+  summaryId?: string;
+  error?: string;
+  result?: any;
+  /**
+   * #639 Mode 2: set when a threshold sweep took no action and did not fail
+   * (no eligible leaf/condensed candidates remain) while still over target —
+   * terminal, non-retryable exhaustion. `ok` stays false (overflow recovery /
+   * #15 still see the honest still-over-target signal); the deferred-debt drain
+   * uses this to stop re-queuing the sweep.
+   */
+  exhausted?: boolean;
+};
+
+export type ContextEngineMaintenanceResult = {
+  changed: boolean;
+  bytesFreed: number;
+  rewrittenEntries: number;
+  reason?: string;
+};
+
+export type ContextEngineMaintenanceRuntimeContext = Record<string, unknown> & {
+  allowDeferredCompactionExecution?: boolean;
+};
+
+export type IngestResult = {
+  ingested: boolean;
+};
+
+export type IngestBatchResult = {
+  ingestedCount: number;
+};
+
+export type SubagentSpawnPreparation = {
+  systemPromptAddition?: string;
+  rollback?: () => void;
+};
+
+export type SubagentEndReason = string;
+
+export type ContextEngineInfo = {
+  id: string;
+  name: string;
+  version: string;
+  acceptedHostParams?: string[];
+  transcriptSemantics?: {
+    currentTurnFence?: "before-current-turn-entry-v1";
+    turnAdvancementIdempotency?: "atomic-idempotent-v1";
+  };
+  ownsCompaction?: boolean;
+  turnMaintenanceMode?: "background" | "inline" | string;
+  hostRequirements?: Partial<Record<ContextEngineOperation, ContextEngineHostRequirements>>;
+};
+
+export type ContextEngineOperation = "agent-run" | "manual-compact" | "subagent-spawn";
+
+export type ContextEngineControlOperation = "status" | "doctor";
+
+export type ContextEngineControlCapabilities = {
+  status: boolean;
+  doctor: boolean;
+  rotate: boolean;
+};
+
+export type ContextEngineControlStatusResult = {
+  operation: "status";
+  active: boolean;
+  messageCount: number;
+};
+
+export type ContextEngineControlDoctorResult = {
+  operation: "doctor";
+  ok: boolean;
+  warnings: string[];
+};
+
+export type ContextEngineControlResult =
+  | ContextEngineControlStatusResult
+  | ContextEngineControlDoctorResult;
+
+export type ContextEngineControlRequest = {
+  agentId?: string;
+  operation: ContextEngineControlOperation;
+  sessionId?: string;
+  sessionKey?: string;
+  runtimeContext?: Record<string, unknown>;
+};
+
+export type ContextEngineHostCapability =
+  | "bootstrap"
+  | "assemble-before-prompt"
+  | "after-turn"
+  | "maintain"
+  | "compact"
+  | "runtime-llm-complete"
+  | "thread-bootstrap-projection";
+
+export type ContextEngineHostRequirements = {
+  requiredCapabilities: ContextEngineHostCapability[];
+  unsupportedMessage?: string;
+};
+
+export type PluginCommandContext = {
+  [key: string]: any;
+};
+
+export type OpenClawPluginCommandDefinition = {
+  name?: string;
+  description?: string;
+  handler: (ctx: PluginCommandContext) => any | Promise<any>;
+  [key: string]: any;
+};
+
+export type ContextEngineFactory = () => ContextEngine | Promise<ContextEngine>;
+
+export type OpenClawPluginApi = {
+  config?: any;
+  runtime?: any;
+  logger?: any;
+  log?: any;
+  registerCommand: (definition: OpenClawPluginCommandDefinition) => void;
+  registerContextEngine?: (id: string, factory: ContextEngineFactory) => void;
+  registerTool?: (
+    factory: (ctx: PluginLifecycleContext) => AnyAgentTool | Promise<AnyAgentTool>,
+    options?: { name?: string; [key: string]: any },
+  ) => void;
+  on: (
+    eventName: string,
+    handler: (event: PluginLifecycleEvent, ctx: PluginLifecycleContext) => unknown | Promise<unknown>,
+  ) => void;
+  session?: {
+    controls?: {
+      registerSessionAction?: (action: PluginSessionActionRegistration) => void;
+    };
+  };
+  [key: string]: any;
+};
+
+export type PluginSessionActionRegistration = {
+  id: string;
+  description?: string;
+  schema?: unknown;
+  requiredScopes?: string[];
+  handler: (ctx: PluginSessionActionContext) => Promise<PluginSessionActionResult>;
+};
+
+export type PluginSessionActionContext = {
+  pluginId: string;
+  actionId: string;
+  sessionKey?: string;
+  payload?: Record<string, unknown>;
+  client?: { connId?: string; scopes: string[] };
+};
+
+export type PluginSessionActionResult =
+  | { ok?: true; result?: unknown }
+  | { ok: false; error: string; code?: string; details?: unknown };
+
+export type AgentMessage = {
+  role: string;
+  content?: any;
+  /** Optional host-owned envelope. Field values remain untrusted model input. */
+  __openclaw?: {
+    senderId?: string;
+    senderName?: string;
+    senderUsername?: string;
+    [key: string]: unknown;
+  };
+  timestamp?: number;
+  toolCallId?: string;
+  toolUseId?: string;
+  toolName?: string;
+  details?: any;
+  isError?: boolean;
+  stopReason?: string;
+  command?: string;
+  output?: unknown;
+};
+
+export type ContextEngineSessionTarget = {
+  agentId?: string;
+  sessionId?: string;
+  sessionKey?: string;
+  storePath?: string;
+  threadId?: string | number;
+};
+
+export type ContextEngineRuntimeContext = {
+  sessionTarget?: ContextEngineSessionTarget;
+  transcriptStorage?: {
+    kind?: string;
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
+};
+
+/** Immutable SQLite transcript identity supplied by OpenClaw. */
+export type TranscriptEntryAnchor = Readonly<{
+  agentId: string;
+  sessionId: string;
+  sessionKey: string;
+  storePath: string;
+  generation: string;
+  entryId: string;
+  rawSeq: number;
+  effectiveParentId: string | null;
+  activeMessagePosition: number;
+  idempotencyKey?: string;
+}>;
+
+/** Current user row that owns one host-issued logical turn. */
+export type TranscriptTurnAdmission = TranscriptEntryAnchor &
+  Readonly<{
+    logicalTurnId: string;
+    role: "user";
+  }>;
+
+export type ContextEngine = {
+  info: ContextEngineInfo;
+  bootstrap(params: {
+    sessionId: string;
+    sessionKey?: string;
+    sessionFile?: string;
+    messages?: AgentMessage[];
+    sessionTarget?: ContextEngineSessionTarget;
+    runtimeSettings?: ContextEngineRuntimeSettings;
+    runtimeContext?: ContextEngineRuntimeContext;
+  }): Promise<BootstrapResult>;
+  ingest(params: {
+    sessionId: string;
+    sessionKey?: string;
+    message: AgentMessage;
+  }): Promise<IngestResult>;
+  ingestBatch?(params: {
+    sessionId: string;
+    sessionKey?: string;
+    messages: AgentMessage[];
+    isHeartbeat?: boolean;
+  }): Promise<IngestBatchResult>;
+  afterTurn?(params: {
+    sessionId: string;
+    sessionKey?: string;
+    sessionTarget?: ContextEngineSessionTarget;
+    sessionFile: string;
+    messages: AgentMessage[];
+    prePromptMessageCount: number;
+    autoCompactionSummary?: string;
+    isHeartbeat?: boolean;
+    tokenBudget?: number;
+    currentTokenCount?: number;
+    runtimeContext?: Record<string, unknown>;
+    runtimeSettings?: ContextEngineRuntimeSettings;
+    legacyCompactionParams?: Record<string, unknown>;
+  }): Promise<void>;
+  commitTurn?(params: {
+    advancementKey: string;
+    admission: TranscriptTurnAdmission;
+    terminal: TranscriptEntryAnchor;
+    messages: AgentMessage[];
+    sessionId: string;
+    sessionKey?: string;
+    sessionTarget?: ContextEngineSessionTarget;
+    runtimeSettings?: ContextEngineRuntimeSettings;
+    runtimeContext?: ContextEngineRuntimeContext;
+    isHeartbeat?: boolean;
+  }): Promise<{ status: "committed" | "duplicate" }>;
+  assemble(params: {
+    sessionId: string;
+    sessionKey?: string;
+    messages: AgentMessage[];
+    tokenBudget?: number;
+    /** Tool names supplied by embedded OpenClaw hosts for the current run. */
+    availableTools?: Set<string>;
+    /**
+     * Incoming user prompt for this turn. Embedded hosts provide pre-prompt
+     * history in messages plus availableTools, adopt the assembled result, then
+     * submit this prompt. Legacy direct callers may use prompt only for retrieval.
+     */
+    prompt?: string;
+    /** Current model identifier from OpenClaw hosts that predate assemble runtimeContext. */
+    model?: string;
+    /** Optional runtime context for override resolution (model, provider, etc.). */
+    runtimeContext?: Record<string, unknown>;
+    runtimeSettings?: ContextEngineRuntimeSettings;
+  }): Promise<AssembleResult>;
+  compact(params: {
+    sessionId: string;
+    sessionKey?: string;
+    sessionFile?: string;
+    tokenBudget?: number;
+    currentTokenCount?: number;
+    compactionTarget?: "budget" | "threshold";
+    customInstructions?: string;
+    runtimeContext?: Record<string, unknown>;
+    runtimeSettings?: ContextEngineRuntimeSettings;
+    legacyParams?: Record<string, unknown>;
+    force?: boolean;
+  }): Promise<CompactResult>;
+  getControlCapabilities?(): ContextEngineControlCapabilities | Promise<ContextEngineControlCapabilities>;
+  control?(params: ContextEngineControlRequest): Promise<ContextEngineControlResult>;
+  prepareSubagentSpawn?(params: {
+    parentSessionId?: string;
+    parentSessionKey?: string;
+    parentSessionFile?: string;
+    childSessionId?: string;
+    childSessionKey: string;
+    childSessionFile?: string;
+    contextMode?: "isolated" | "fork";
+  }): Promise<SubagentSpawnPreparation | undefined>;
+  onSubagentEnded?(params: {
+    childSessionId?: string;
+    childSessionKey: string;
+    reason?: SubagentEndReason;
+  }): Promise<void>;
+  maintain?(params: {
+    sessionId: string;
+    sessionFile: string;
+    sessionKey?: string;
+    runtimeContext?: ContextEngineMaintenanceRuntimeContext;
+    runtimeSettings?: ContextEngineRuntimeSettings;
+  }): Promise<ContextEngineMaintenanceResult>;
+  dispose?(): Promise<void>;
+};
