@@ -44,6 +44,10 @@ jobs:
           # 'edgesOut')"); a developer would reach for a newer npm.
           if [ -n "$PACKAGES" ]; then npx -y npm@11.6.2 install --no-audit --no-fund $PACKAGES; fi
           if [ -n "$DEV_PACKAGES" ]; then npx -y npm@11.6.2 install --no-audit --no-fund --save-dev $DEV_PACKAGES; fi
+          # The lockfile must install with the npm this repository's CI runs (Node 22's), which reads some trees npm 11
+          # writes as out of sync: rewrite it with that npm, then install clean from it as CI does.
+          npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+          npm ci --no-audit --no-fund
           npm run typecheck
           npx vitest run --dir test
           git config user.name "fixture-developer"
