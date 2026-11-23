@@ -71,6 +71,8 @@ for (const pull of pulls.sort((a, b) => a.number - b.number)) {
   const touchesWorkflows = files.some(file => file.filename.startsWith('.github/workflows/'))
   const reject = config.reject?.package
   if (reject !== undefined && Object.keys(moves).length === 1 && moves[reject] !== undefined) {
+    // "by": "person": a real person closes it from their own account (Darwin reads only people's comments for why).
+    if (config.reject.by === 'person') { console.log(`#${pull.number}: ${reject} is for a person to reject, left`); continue }
     await gh('POST', `repos/${REPO}/issues/${pull.number}/comments`, { body: config.reject.reason })
     await gh('PATCH', `repos/${REPO}/pulls/${pull.number}`, { state: 'closed' })
     decisions.push(`closed #${pull.number} (${reject}@${moves[reject]}), rejecting it: "${config.reject.reason}"`)
