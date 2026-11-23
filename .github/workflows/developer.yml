@@ -1,0 +1,53 @@
+name: Developer activity
+
+# Once a day a simulated developer makes the next change (.github/fixture/developer.mjs): a real dependency at an old
+# release with code that uses it and a test, or code that calls a provider's API. It type-checks, runs the tests and
+# pushes to the default branch: Darwin should propose the newer release (migrating the code when it breaks), hold it
+# with the reason, or fix the call to what the provider retired.
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: developer
+  cancel-in-progress: false
+
+jobs:
+  change:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Make the next change
+        id: change
+        run: |
+          set -euo pipefail
+          out=$(node .github/fixture/developer.mjs)
+          echo "$out"
+          node -e 'const d = JSON.parse(process.argv[1]); require("fs").writeFileSync(process.argv[2], d.message ?? ""); console.log(`packages=${(d.packages ?? []).join(" ")}`); console.log(`dev=${(d.devPackages ?? []).join(" ")}`); console.log(`changed=${d.message ? "true" : "false"}`)' "$out" "$RUNNER_TEMP/message.txt" >> "$GITHUB_OUTPUT"
+      - name: Install, type-check, test and push
+        if: steps.change.outputs.changed == 'true'
+        env:
+          PACKAGES: ${{ steps.change.outputs.packages }}
+          DEV_PACKAGES: ${{ steps.change.outputs.dev }}
+        run: |
+          set -euo pipefail
+          # npm 10.9 (Node 22's) fails to resolve this tree from scratch ("Cannot read properties of null (reading
+          # 'edgesOut')"); a developer would reach for a newer npm.
+          if [ -n "$PACKAGES" ]; then npx -y npm@11.6.2 install --no-audit --no-fund $PACKAGES; fi
+          if [ -n "$DEV_PACKAGES" ]; then npx -y npm@11.6.2 install --no-audit --no-fund --save-dev $DEV_PACKAGES; fi
+          npm run typecheck
+          npx vitest run --dir test
+          git config user.name "fixture-developer"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -F "$RUNNER_TEMP/message.txt"
+          git push origin HEAD

@@ -1,0 +1,31 @@
+name: Maintainer
+
+# A simulated person on the team (.github/fixture/maintainer.mjs): merges what Darwin marked ready, reviews and merges
+# what Darwin held once its CI has passed for a day, and rejects one package's updates. Off unless the repository
+# variable FIXTURE_MAINTAINER_MERGES is 'true'.
+on:
+  schedule:
+    - cron: '45 */6 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  checks: read
+
+concurrency:
+  group: maintainer
+  cancel-in-progress: false
+
+jobs:
+  maintain:
+    if: vars.FIXTURE_MAINTAINER_MERGES == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Review Darwin's pull requests
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: node .github/fixture/maintainer.mjs

@@ -1,0 +1,57 @@
+name: Darwin watch
+
+# Every 3 hours: did Darwin handle every change the fixture made (.github/fixture/watch.mjs)? The report replaces the
+# body of the open issue titled "Darwin fixture watch"; a comment is added when the failures change. The run fails
+# while anything is missed, stuck, inconsistent with the console, or ready with failing CI.
+on:
+  schedule:
+    - cron: '15 */3 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+  checks: read
+
+concurrency:
+  group: darwin-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check Darwin
+        id: watch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          DARWIN_API: https://api.staging.dovellabs.si
+          DARWIN_WORKSPACE: dovel-ai
+          DARWIN_TOKEN: ${{ secrets.DARWIN_TOKEN }}
+          REPORT: ${{ runner.temp }}/report.md
+          STATE: ${{ runner.temp }}/state.json
+        run: node .github/fixture/watch.mjs
+      - name: Publish the report
+        if: always() && steps.watch.outcome != 'skipped'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPORT: ${{ runner.temp }}/report.md
+        run: |
+          set -euo pipefail
+          [ -f "$REPORT" ] || exit 0
+          cat "$REPORT" >> "$GITHUB_STEP_SUMMARY"
+          issue=$(gh issue list --state open --search 'in:title "Darwin fixture watch"' --json number --jq '.[0].number // empty')
+          if [ -z "$issue" ]; then
+            gh issue create --title "Darwin fixture watch" --body-file "$REPORT" >/dev/null
+            exit 0
+          fi
+          before=$(gh issue view "$issue" --json body --jq '.body' | sed -n '/^## Failures/,/^## Changes/p')
+          gh issue edit "$issue" --body-file "$REPORT" >/dev/null
+          after=$(sed -n '/^## Failures/,/^## Changes/p' "$REPORT")
+          if [ "$before" != "$after" ]; then
+            { echo "Failures changed at $(date -u +%FT%RZ):"; echo; if [ -n "$after" ]; then echo "$after" | sed '/^## Changes/d'; else echo "None now."; fi; } > "$RUNNER_TEMP/comment.md"
+            gh issue comment "$issue" --body-file "$RUNNER_TEMP/comment.md" >/dev/null
+          fi
