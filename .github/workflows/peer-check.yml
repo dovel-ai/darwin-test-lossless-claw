@@ -1,0 +1,31 @@
+name: Peer check
+
+# The fixture's: the team's internal plugin peers dayjs ~1.10.0. On pull requests only, it is installed on top of the
+# repository's own install, as the app that loads it does. Darwin's validation does not run pull-request-only jobs, so
+# a proposal past the range passes there and fails here with npm's ERESOLVE, where the base branch passes: the case
+# Darwin's CI repair answers with the newest release every stated range admits.
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  peer-check:
+    name: peer-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Install the plugin that peers dayjs ~1.10.0
+        run: |
+          set -euo pipefail
+          plugin="$RUNNER_TEMP/fixture-peer-cap"
+          mkdir -p "$plugin"
+          printf '%s' '{"name":"fixture-peer-cap","version":"1.0.0","peerDependencies":{"dayjs":"~1.10.0"}}' > "$plugin/package.json"
+          (cd "$plugin" && npm pack --silent)
+          npm install --no-save --no-audit --no-fund "$plugin/fixture-peer-cap-1.0.0.tgz"
