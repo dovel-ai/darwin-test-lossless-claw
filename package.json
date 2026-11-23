@@ -48,7 +48,7 @@
     "LICENSE"
   ],
   "dependencies": {
-    "@sinclair/typebox": "0.34.48",
+    "@sinclair/typebox": "0.34.52",
     "dayjs": "^1.10.0",
     "escape-string-regexp": "^2.0.0",
     "openai": "^7.5.0",
