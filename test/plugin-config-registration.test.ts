@@ -1219,7 +1219,7 @@ describe("lcm plugin registration", () => {
     });
     api.config = compactionAndDefaultModelConfig({
       compactionModel: "anthropic/claude-opus-4-6",
-      defaultModel: "openai-codex/gpt-5.3-codex",
+      defaultModel: "openai-codex/gpt-6-sol",
     }) as OpenClawPluginApi["config"];
     lcmPlugin.register(api);
 

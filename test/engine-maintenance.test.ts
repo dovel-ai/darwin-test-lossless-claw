@@ -1421,7 +1421,7 @@ describe("LcmContextEngine maintain and assemble budget", () => {
       const engine = createEngineWithDeps(
         {
           summaryProvider: "openai-codex",
-          summaryModel: "gpt-5.3-codex",
+          summaryModel: "gpt-6-sol",
           fallbackProviders: [{ provider: "anthropic", model: "claude-sonnet-4-6" }],
           sweepMaxDepth: -1,
           incrementalMaxDepth: -1,
@@ -1443,7 +1443,7 @@ describe("LcmContextEngine maintain and assemble budget", () => {
             if (providerHint === "anthropic" || modelRef === "anthropic/claude-sonnet-4-6") {
               return { provider: "anthropic", model: "claude-sonnet-4-6" };
             }
-            return { provider: "openai-codex", model: "gpt-5.3-codex" };
+            return { provider: "openai-codex", model: "gpt-6-sol" };
           }),
         },
       );

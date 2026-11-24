@@ -270,7 +270,7 @@ Scans for genuinely truncated summaries and can rewrite them in place. This is n
 lcm-tui doctor 44 --show-diff
 
 # Apply repairs through Codex CLI OAuth after `codex login`
-lcm-tui doctor 44 --apply --provider openai-codex --model gpt-5.3-codex
+lcm-tui doctor 44 --apply --provider openai-codex --model gpt-6-sol
 
 # Scan only across every conversation
 lcm-tui doctor --all
@@ -318,10 +318,10 @@ lcm-tui repair 44 --apply
 lcm-tui repair 44 --summary-id sum_abc123 --apply
 
 # Repair through Codex CLI OAuth after `codex login`
-lcm-tui repair 44 --apply --provider openai-codex --model gpt-5.3-codex
+lcm-tui repair 44 --apply --provider openai-codex --model gpt-6-sol
 
 # Repair through a custom OpenAI-compatible proxy with a raw API key
-lcm-tui repair 44 --apply --provider openai --model gpt-5.3-codex --base-url https://proxy.example.com/openai
+lcm-tui repair 44 --apply --provider openai --model gpt-6-sol --base-url https://proxy.example.com/openai
 ```
 
 The repair process:
@@ -357,10 +357,10 @@ lcm-tui rewrite 44 --depth 0 --apply
 lcm-tui rewrite 44 --all --apply --diff
 
 # Rewrite with Codex CLI OAuth after `codex login`
-lcm-tui rewrite 44 --summary sum_abc123 --provider openai-codex --model gpt-5.3-codex --apply
+lcm-tui rewrite 44 --summary sum_abc123 --provider openai-codex --model gpt-6-sol --apply
 
 # Rewrite through a custom OpenAI-compatible proxy with a raw API key
-lcm-tui rewrite 44 --summary sum_abc123 --provider openai --model gpt-5.3-codex --base-url https://proxy.example.com/openai --apply
+lcm-tui rewrite 44 --summary sum_abc123 --provider openai --model gpt-6-sol --base-url https://proxy.example.com/openai --apply
 
 # Use custom prompt templates
 lcm-tui rewrite 44 --all --apply --prompt-dir ~/.config/lcm-tui/prompts
@@ -453,10 +453,10 @@ lcm-tui backfill my-agent session_abc123 --apply --recompact --single-root
 lcm-tui backfill my-agent session_abc123 --apply --transplant-to 653
 
 # Backfill using Codex CLI OAuth after `codex login`
-lcm-tui backfill my-agent session_abc123 --apply --provider openai-codex --model gpt-5.3-codex
+lcm-tui backfill my-agent session_abc123 --apply --provider openai-codex --model gpt-6-sol
 
 # Backfill through a custom OpenAI-compatible proxy with a raw API key
-lcm-tui backfill my-agent session_abc123 --apply --provider openai --model gpt-5.3-codex --base-url https://proxy.example.com/openai
+lcm-tui backfill my-agent session_abc123 --apply --provider openai --model gpt-6-sol --base-url https://proxy.example.com/openai
 ```
 
 All write paths are transactional:

@@ -31,7 +31,7 @@ const (
 	miniMaxProviderID      = "minimax"
 	miniMaxCNProviderID    = "minimax-cn"
 	miniMaxModel           = "MiniMax-M3"
-	openAIResponsesModel   = "gpt-5.3-codex"
+	openAIResponsesModel   = "gpt-6-sol"
 	condensedTargetTokens  = 2000
 	defaultHTTPTimeout     = 180 * time.Second
 

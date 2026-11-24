@@ -758,7 +758,7 @@ describe("createLcmSummarizeFromLegacyParams", () => {
     const deps = makeDeps({
       resolveModel: vi.fn(() => ({
         provider: "openai",
-        model: "gpt-5.3-codex",
+        model: "gpt-6-sol",
       })),
       complete: vi.fn(async () => ({
         content: [
@@ -779,7 +779,7 @@ describe("createLcmSummarizeFromLegacyParams", () => {
       deps,
       legacyParams: {
         provider: "openai",
-        model: "gpt-5.3-codex",
+        model: "gpt-6-sol",
       },
     });
 
@@ -946,7 +946,7 @@ describe("createLcmSummarizeFromLegacyParams", () => {
     const deps = makeDeps({
       resolveModel: vi.fn(() => ({
         provider: "openai",
-        model: "gpt-5.3-codex",
+        model: "gpt-6-sol",
       })),
       complete: vi.fn(async () => ({
         content: [{ type: "reasoning" }],
@@ -957,7 +957,7 @@ describe("createLcmSummarizeFromLegacyParams", () => {
       deps,
       legacyParams: {
         provider: "openai",
-        model: "gpt-5.3-codex",
+        model: "gpt-6-sol",
       },
     });
 
@@ -966,7 +966,7 @@ describe("createLcmSummarizeFromLegacyParams", () => {
 
     const diagnostics = getDepsLogText(deps);
     expect(diagnostics).toContain("provider=openai");
-    expect(diagnostics).toContain("model=gpt-5.3-codex");
+    expect(diagnostics).toContain("model=gpt-6-sol");
     expect(diagnostics).toContain("block_types=reasoning");
     expect(diagnostics).toContain("content_preview=");
   });
@@ -1771,7 +1771,7 @@ describe("createLcmSummarizeFromLegacyParams", () => {
       const deps = makeDeps({
         resolveModel: vi.fn(() => ({
           provider: "openai",
-          model: "gpt-5.3-codex",
+          model: "gpt-6-sol",
         })),
         complete: vi.fn(async () => {
           callCount++;
@@ -1784,7 +1784,7 @@ describe("createLcmSummarizeFromLegacyParams", () => {
 
       const summarize = await createSummarizeFn({
         deps,
-        legacyParams: { provider: "openai", model: "gpt-5.3-codex" },
+        legacyParams: { provider: "openai", model: "gpt-6-sol" },
       });
 
       const summary = await summarize!("A".repeat(8_000), false);
@@ -1805,7 +1805,7 @@ describe("createLcmSummarizeFromLegacyParams", () => {
       const deps = makeDeps({
         resolveModel: vi.fn(() => ({
           provider: "openai",
-          model: "gpt-5.3-codex",
+          model: "gpt-6-sol",
         })),
         complete: vi.fn(async () => {
           callCount++;
@@ -1818,7 +1818,7 @@ describe("createLcmSummarizeFromLegacyParams", () => {
 
       const summarize = await createSummarizeFn({
         deps,
-        legacyParams: { provider: "openai", model: "gpt-5.3-codex" },
+        legacyParams: { provider: "openai", model: "gpt-6-sol" },
       });
 
       // Very short input so the targetTokens floor (192) applies. With summary
@@ -1842,7 +1842,7 @@ describe("createLcmSummarizeFromLegacyParams", () => {
       const deps = makeDeps({
         resolveModel: vi.fn(() => ({
           provider: "openai",
-          model: "gpt-5.3-codex",
+          model: "gpt-6-sol",
         })),
         complete: vi.fn(async () => {
           callCount++;
@@ -1855,7 +1855,7 @@ describe("createLcmSummarizeFromLegacyParams", () => {
 
       const summarize = await createSummarizeFn({
         deps,
-        legacyParams: { provider: "openai", model: "gpt-5.3-codex" },
+        legacyParams: { provider: "openai", model: "gpt-6-sol" },
       });
 
       // Long input so targetTokens saturates at leafTargetTokens (600). The
@@ -2003,7 +2003,7 @@ describe("createLcmSummarizeFromLegacyParams", () => {
       const deps = makeDeps({
         resolveModel: vi.fn(() => ({
           provider: "openai",
-          model: "gpt-5.3-codex",
+          model: "gpt-6-sol",
         })),
         complete: vi.fn(async () => {
           callCount++;
@@ -2016,7 +2016,7 @@ describe("createLcmSummarizeFromLegacyParams", () => {
 
       const summarize = await createSummarizeFn({
         deps,
-        legacyParams: { provider: "openai", model: "gpt-5.3-codex" },
+        legacyParams: { provider: "openai", model: "gpt-6-sol" },
       });
 
       const longInput = "C".repeat(10_000);
@@ -2033,15 +2033,15 @@ describe("createLcmSummarizeFromLegacyParams", () => {
       const deps = makeDeps({
         resolveModel: vi.fn(() => ({
           provider: "openai",
-          model: "gpt-5.3-codex",
+          model: "gpt-6-sol",
         })),
         complete: vi.fn(async () => ({
           content: [],
           id: "req_abc123",
           provider: "openai-codex",
-          model: "gpt-5.3-codex-20260101",
+          model: "gpt-6-sol-20260101",
           request_provider: "openai-codex",
-          request_model: "gpt-5.3-codex",
+          request_model: "gpt-6-sol",
           request_api: "openai-codex-responses",
           request_reasoning: "low",
           request_has_system: "true",
@@ -2062,7 +2062,7 @@ describe("createLcmSummarizeFromLegacyParams", () => {
 
       const summarize = await createSummarizeFn({
         deps,
-        legacyParams: { provider: "openai", model: "gpt-5.3-codex" },
+        legacyParams: { provider: "openai", model: "gpt-6-sol" },
       });
 
       await summarize!("D".repeat(8_000), false);
@@ -2070,7 +2070,7 @@ describe("createLcmSummarizeFromLegacyParams", () => {
       const diagnostics = getDepsLogText(deps);
       expect(diagnostics).toContain("id=req_abc123");
       expect(diagnostics).toContain("resp_provider=openai-codex");
-      expect(diagnostics).toContain("resp_model=gpt-5.3-codex-20260101");
+      expect(diagnostics).toContain("resp_model=gpt-6-sol-20260101");
       expect(diagnostics).toContain("request_api=openai-codex-responses");
       expect(diagnostics).toContain("request_reasoning=low");
       expect(diagnostics).toContain("request_has_system=true");
@@ -2125,7 +2125,7 @@ describe("createLcmSummarizeFromLegacyParams", () => {
       const deps = makeDeps({
         resolveModel: vi.fn(() => ({
           provider: "openai",
-          model: "gpt-5.3-codex",
+          model: "gpt-6-sol",
         })),
         complete: vi.fn(async () => ({
           content: [
@@ -2142,7 +2142,7 @@ describe("createLcmSummarizeFromLegacyParams", () => {
 
       const summarize = await createSummarizeFn({
         deps,
-        legacyParams: { provider: "openai", model: "gpt-5.3-codex" },
+        legacyParams: { provider: "openai", model: "gpt-6-sol" },
       });
 
       await summarize!("E".repeat(8_000), false);
@@ -2183,7 +2183,7 @@ describe("createLcmSummarizeFromLegacyParams", () => {
       const deps = makeDeps({
         resolveModel: vi.fn(() => ({
           provider: "openai",
-          model: "gpt-5.3-codex",
+          model: "gpt-6-sol",
         })),
         complete: vi.fn(async () => ({
           content: [],
@@ -2193,7 +2193,7 @@ describe("createLcmSummarizeFromLegacyParams", () => {
 
       const summarize = await createSummarizeFn({
         deps,
-        legacyParams: { provider: "openai", model: "gpt-5.3-codex" },
+        legacyParams: { provider: "openai", model: "gpt-6-sol" },
       });
 
       const summary = await summarize!("A".repeat(8_000), false);
@@ -2249,7 +2249,7 @@ describe("createLcmSummarizeFromLegacyParams", () => {
       const deps = makeDeps({
         resolveModel: vi.fn(() => ({
           provider: "openai",
-          model: "gpt-5.3-codex",
+          model: "gpt-6-sol",
         })),
         complete: vi.fn(async () => ({
           content: [{ type: "reasoning" }],
@@ -2268,7 +2268,7 @@ describe("createLcmSummarizeFromLegacyParams", () => {
 
       const summarize = await createSummarizeFn({
         deps,
-        legacyParams: { provider: "openai", model: "gpt-5.3-codex" },
+        legacyParams: { provider: "openai", model: "gpt-6-sol" },
       });
 
       const summary = await summarize!("C".repeat(8_000), false);
@@ -2320,7 +2320,7 @@ describe("createLcmSummarizeFromLegacyParams", () => {
       const deps = makeDeps({
         resolveModel: vi.fn(() => ({
           provider: "openai",
-          model: "gpt-5.3-codex",
+          model: "gpt-6-sol",
         })),
         complete: vi.fn(async () => ({
           content: [
@@ -2343,7 +2343,7 @@ describe("createLcmSummarizeFromLegacyParams", () => {
 
       const summarize = await createSummarizeFn({
         deps,
-        legacyParams: { provider: "openai", model: "gpt-5.3-codex" },
+        legacyParams: { provider: "openai", model: "gpt-6-sol" },
       });
 
       const summary = await summarize!("E".repeat(4_000), false);

@@ -60,7 +60,7 @@ func TestResolveProviderBaseURLMiniMaxRegionalDefaults(t *testing.T) {
 
 func TestResolveInteractiveRewriteProviderModelUsesTUISummaryBaseURL(t *testing.T) {
 	t.Setenv("LCM_TUI_SUMMARY_PROVIDER", "openai")
-	t.Setenv("LCM_TUI_SUMMARY_MODEL", "gpt-5.3-codex")
+	t.Setenv("LCM_TUI_SUMMARY_MODEL", "gpt-6-sol")
 	t.Setenv("LCM_TUI_SUMMARY_BASE_URL", "https://tui.example.com/openai/")
 	t.Setenv("LCM_SUMMARY_BASE_URL", "https://summary.example.com/openai/")
 
@@ -68,8 +68,8 @@ func TestResolveInteractiveRewriteProviderModelUsesTUISummaryBaseURL(t *testing.
 	if provider != "openai" {
 		t.Fatalf("expected provider openai, got %q", provider)
 	}
-	if model != "gpt-5.3-codex" {
-		t.Fatalf("expected model gpt-5.3-codex, got %q", model)
+	if model != "gpt-6-sol" {
+		t.Fatalf("expected model gpt-6-sol, got %q", model)
 	}
 	if baseURL != "https://tui.example.com/openai" {
 		t.Fatalf("expected TUI base URL override, got %q", baseURL)
@@ -78,7 +78,7 @@ func TestResolveInteractiveRewriteProviderModelUsesTUISummaryBaseURL(t *testing.
 
 func TestResolveTUISummaryRuntimeSettingsPrefersCLIOverEnv(t *testing.T) {
 	t.Setenv("LCM_TUI_SUMMARY_PROVIDER", "openai")
-	t.Setenv("LCM_TUI_SUMMARY_MODEL", "gpt-5.3-codex")
+	t.Setenv("LCM_TUI_SUMMARY_MODEL", "gpt-6-sol")
 	t.Setenv("LCM_TUI_SUMMARY_BASE_URL", "https://tui.example.com/openai/")
 	t.Setenv("LCM_SUMMARY_PROVIDER", "anthropic")
 	t.Setenv("LCM_SUMMARY_MODEL", "claude-sonnet-4-20250514")
@@ -106,7 +106,7 @@ func TestResolveTUISummaryRuntimeSettingsPrefersCLIOverEnv(t *testing.T) {
 
 func TestResolveTUISummaryRuntimeSettingsUsesTUIEnvBeforeLegacyEnv(t *testing.T) {
 	t.Setenv("LCM_TUI_SUMMARY_PROVIDER", "openai")
-	t.Setenv("LCM_TUI_SUMMARY_MODEL", "gpt-5.3-codex")
+	t.Setenv("LCM_TUI_SUMMARY_MODEL", "gpt-6-sol")
 	t.Setenv("LCM_TUI_SUMMARY_BASE_URL", "https://tui.example.com/openai/")
 	t.Setenv("LCM_SUMMARY_PROVIDER", "anthropic")
 	t.Setenv("LCM_SUMMARY_MODEL", "claude-sonnet-4-20250514")
@@ -116,7 +116,7 @@ func TestResolveTUISummaryRuntimeSettingsUsesTUIEnvBeforeLegacyEnv(t *testing.T)
 	if settings.provider != "openai" {
 		t.Fatalf("expected TUI env provider, got %q", settings.provider)
 	}
-	if settings.model != "gpt-5.3-codex" {
+	if settings.model != "gpt-6-sol" {
 		t.Fatalf("expected TUI env model, got %q", settings.model)
 	}
 	if settings.baseURL != "https://tui.example.com/openai" {
