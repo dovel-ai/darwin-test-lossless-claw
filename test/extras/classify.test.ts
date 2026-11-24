@@ -7,7 +7,7 @@ afterEach(async () => server?.close());
 
 describe("classify", () => {
   it("returns the model's one-word answer", async () => {
-    server = await fakeServer(() => ({ completion: " Question", stop_reason: "stop_sequence" }));
+    server = await fakeServer(() => ({ content: [{ type: "text", text: " Question" }], stop_reason: "end_turn" }));
     expect(await classify("is it done?", "test-key", server.url)).toBe("question");
   });
 });
