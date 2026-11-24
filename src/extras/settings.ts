@@ -6,5 +6,5 @@ const Contact = z.object({ email: z.string().email(), name: z.string().nonempty(
 export function contactProblems(input: unknown): string[] {
   const parsed = Contact.safeParse(input);
   if (parsed.success) return [];
-  return parsed.error.errors.map((issue) => `${issue.path.join(".")}: ${issue.code}`);
+  return parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.code}`);
 }
