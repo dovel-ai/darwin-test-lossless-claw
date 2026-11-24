@@ -2,7 +2,7 @@
   "ecosystem": "npm",
   "library": null,
   "deadlineHours": 48,
-  "heldMergeAfterHours": 24,
+  "heldMergeAfterHours": 4,
   "reject": {
     "package": "@changesets/changelog-github",
     "reason": "Not now, thanks: we only touch the release tooling during a release.",
