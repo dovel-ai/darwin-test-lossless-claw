@@ -51,7 +51,7 @@
     "@sinclair/typebox": "0.34.52",
     "date-fns": "^4.4.0",
     "dayjs": "^1.10.8",
-    "escape-string-regexp": "^2.0.0",
+    "escape-string-regexp": "^5.0.0",
     "nanoid": "^3.3.4",
     "openai": "^7.63.0",
     "react": "^17.0.2",
