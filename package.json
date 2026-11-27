@@ -108,5 +108,8 @@
   "homepage": "https://github.com/Martian-Engineering/lossless-claw#readme",
   "bugs": {
     "url": "https://github.com/Martian-Engineering/lossless-claw/issues"
+  },
+  "overrides": {
+    "@modelcontextprotocol/sdk": "1.32.0"
   }
 }
